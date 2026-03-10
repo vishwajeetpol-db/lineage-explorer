@@ -1,0 +1,52 @@
+bundle:
+  name: lineage-explorer
+
+variables:
+  warehouse_id:
+    description: "SQL Warehouse ID for executing queries"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://your-workspace.cloud.databricks.com
+    resources:
+      apps:
+        lineage-explorer:
+          name: lineage-explorer-dev
+          description: "Unity Catalog Lineage Explorer - Interactive DAG visualization"
+          source_code_path: .
+          config:
+            command:
+              - uvicorn
+              - backend.main:app
+              - --host
+              - 0.0.0.0
+              - --port
+              - 8000
+            env:
+              - name: DATABRICKS_WAREHOUSE_ID
+                value: ${var.warehouse_id}
+
+  prod:
+    mode: production
+    workspace:
+      host: https://your-workspace.cloud.databricks.com
+    resources:
+      apps:
+        lineage-explorer:
+          name: lineage-explorer
+          description: "Unity Catalog Lineage Explorer - Interactive DAG visualization"
+          source_code_path: .
+          config:
+            command:
+              - uvicorn
+              - backend.main:app
+              - --host
+              - 0.0.0.0
+              - --port
+              - 8000
+            env:
+              - name: DATABRICKS_WAREHOUSE_ID
+                value: ${var.warehouse_id}

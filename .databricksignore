@@ -1,0 +1,16 @@
+frontend/node_modules/
+frontend/src/
+frontend/public/
+frontend/*.ts
+frontend/*.js
+frontend/index.html
+.venv/
+__pycache__/
+*.pyc
+*.png
+table_dependancy_graph
+worspace_details_access_tokens
+.git/
+ss_*
+screenshot_*
+databricks.yml

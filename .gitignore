@@ -1,0 +1,25 @@
+frontend/node_modules/
+.venv/
+__pycache__/
+*.pyc
+*.png
+ss_*
+screenshot_*
+
+# Sensitive / local files
+worspace_details_access_tokens
+table_dependancy_graph
+.env
+.env.*
+*.pem
+*.key
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Databricks local state
+.databricks/
+.claude/
