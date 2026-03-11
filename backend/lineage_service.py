@@ -71,19 +71,37 @@ def _execute_sql(client: WorkspaceClient, sql: str, catalog: str = None) -> list
 
 
 def list_catalogs() -> list[str]:
+    """List catalogs using the Unity Catalog API (no system catalog access needed)."""
     client = _get_client()
-    rows = _execute_sql(client, "SELECT catalog_name FROM system.information_schema.catalogs ORDER BY catalog_name")
-    return [r["catalog_name"] for r in rows if r["catalog_name"] not in ("system", "__databricks_internal")]
+    skip = {"system", "__databricks_internal"}
+    try:
+        # Use the UC API — only returns catalogs the SPN has privileges on.
+        # Does NOT require access to the system catalog.
+        catalogs = list(client.catalogs.list())
+        return sorted([c.name for c in catalogs if c.name and c.name not in skip])
+    except Exception as e:
+        logger.warning(f"UC catalog list API failed, falling back to SQL: {e}")
+        # Fallback to SQL (requires system catalog access)
+        rows = _execute_sql(client, "SELECT catalog_name FROM system.information_schema.catalogs ORDER BY catalog_name")
+        return [r["catalog_name"] for r in rows if r["catalog_name"] not in skip]
 
 
 def list_schemas(catalog: str) -> list[str]:
+    """List schemas using the Unity Catalog API (no system catalog access needed)."""
     client = _get_client()
-    rows = _execute_sql(
-        client,
-        f"SELECT schema_name FROM `{catalog}`.information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'default') ORDER BY schema_name",
-        catalog=catalog,
-    )
-    return [r["schema_name"] for r in rows]
+    skip = {"information_schema", "default"}
+    try:
+        # Use the UC API — only returns schemas the SPN has privileges on.
+        schemas = list(client.schemas.list(catalog_name=catalog))
+        return sorted([s.name for s in schemas if s.name and s.name not in skip])
+    except Exception as e:
+        logger.warning(f"UC schema list API failed, falling back to SQL: {e}")
+        rows = _execute_sql(
+            client,
+            f"SELECT schema_name FROM `{catalog}`.information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'default') ORDER BY schema_name",
+            catalog=catalog,
+        )
+        return [r["schema_name"] for r in rows]
 
 
 def _infer_lineage(client: WorkspaceClient, catalog: str, schema: str, schema_tables: set[str]) -> list[dict]:
