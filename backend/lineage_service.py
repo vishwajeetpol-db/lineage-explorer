@@ -1,3 +1,25 @@
+"""
+Lineage service — queries Unity Catalog metadata to build lineage graphs.
+
+Minimum SPN privileges required (no SELECT needed):
+  - USE CATALOG on target catalog
+  - BROWSE on target catalog
+  - USE SCHEMA on target schema(s)
+  - CAN_USE on the SQL warehouse
+
+With these privileges, the service can:
+  - List catalogs/schemas (information_schema, visible via USE CATALOG)
+  - List tables and columns (information_schema, visible via BROWSE)
+  - Infer lineage via naming conventions (raw_* -> cleaned_*) and column overlap
+
+Optional privileges that improve lineage quality:
+  - SELECT on schema: enables view definition parsing (view_definition visible)
+  - SELECT on system.access: enables real lineage from system.access.table_lineage
+  - SELECT on system.query: enables query history parsing for CTAS lineage
+
+All optional queries are wrapped in try/except — the app degrades gracefully.
+"""
+
 import os
 import logging
 from databricks.sdk import WorkspaceClient

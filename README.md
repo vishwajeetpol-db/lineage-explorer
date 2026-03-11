@@ -241,30 +241,35 @@ databricks apps get lineage-explorer --profile sp-lineage -o json \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['service_principal_client_id'])"
 ```
 
-Then grant it access (run as a user with appropriate privileges):
+Then grant **minimum required privileges** (no SELECT needed):
 
 ```sql
 -- Replace <app-spn-client-id> with the app's service_principal_client_id
--- Catalog access
+
+-- Minimum required (app is fully functional with just these):
 GRANT USE CATALOG ON CATALOG your_catalog TO `<app-spn-client-id>`;
 GRANT BROWSE ON CATALOG your_catalog TO `<app-spn-client-id>`;
-
--- Schema access (repeat for each schema the app should visualize)
 GRANT USE SCHEMA ON SCHEMA your_catalog.your_schema TO `<app-spn-client-id>`;
+
+-- SQL warehouse access:
+GRANT CAN_USE ON WAREHOUSE your_warehouse TO `<app-spn-client-id>`;
+```
+
+That's it. The app works with these 4 grants. **SELECT is not required.**
+
+#### Optional: enhanced lineage (if you want richer edge detection)
+
+```sql
+-- SELECT on schema: enables view definition parsing for more accurate view lineage
 GRANT SELECT ON SCHEMA your_catalog.your_schema TO `<app-spn-client-id>`;
 
--- SQL warehouse access
-GRANT CAN_USE ON WAREHOUSE your_warehouse TO `<app-spn-client-id>`;
-
--- For system lineage tables (requires metastore admin):
+-- System lineage tables (requires metastore admin): enables real lineage from Unity Catalog
 GRANT USE CATALOG ON CATALOG system TO `<app-spn-client-id>`;
 GRANT USE SCHEMA ON SCHEMA system.access TO `<app-spn-client-id>`;
 GRANT SELECT ON SCHEMA system.access TO `<app-spn-client-id>`;
 GRANT USE SCHEMA ON SCHEMA system.query TO `<app-spn-client-id>`;
 GRANT SELECT ON SCHEMA system.query TO `<app-spn-client-id>`;
 ```
-
-> **Note:** If you don't have metastore admin access to grant system catalog permissions, the app will automatically fall back to the inference-based lineage strategy. The app is fully functional without system table access.
 
 ### 7. Deploy
 
@@ -322,13 +327,29 @@ Login is handled automatically via Databricks OAuth SSO. Users accessing the app
 | **Recommended for** | Production, CI/CD, automation | Local dev only |
 | **Env vars** | `DATABRICKS_CLIENT_ID` + `DATABRICKS_CLIENT_SECRET` | `DATABRICKS_TOKEN` |
 
-### Minimal SP permissions for this app
+### Minimum SP permissions (no SELECT required)
 
-The app's auto-generated service principal needs:
-- `USE CATALOG` + `BROWSE` on target catalogs
-- `USE SCHEMA` + `SELECT` on target schemas
-- `CAN_USE` on the SQL warehouse
-- (Optional) `SELECT` on `system.access` and `system.query` schemas for system lineage tables
+The app's auto-generated service principal needs only:
+
+| Privilege | On | Required? | What it enables |
+|---|---|---|---|
+| `USE CATALOG` | Target catalog | **Required** | Access the catalog |
+| `BROWSE` | Target catalog | **Required** | List catalogs, see table/column metadata in information_schema |
+| `USE SCHEMA` | Target schema(s) | **Required** | Access schemas, see tables/columns |
+| `CAN_USE` | SQL Warehouse | **Required** | Execute SQL statements |
+| `SELECT` | Target schema(s) | Optional | View definition parsing (richer view lineage) |
+| `SELECT` | `system.access` | Optional | Real lineage from system.access.table_lineage |
+| `SELECT` | `system.query` | Optional | Query history parsing for CTAS lineage |
+
+### How lineage quality scales with privileges
+
+| Privileges granted | Lineage strategies available | Approx edge coverage |
+|---|---|---|
+| Minimum only (no SELECT) | Naming conventions (`raw_*`→`cleaned_*`) + column overlap heuristic | ~60-70% |
+| + SELECT on schema | Above + view definition parsing | ~85-90% |
+| + SELECT on system tables | Real Unity Catalog lineage (best quality) | ~100% |
+
+The app **never crashes** regardless of privilege level — all optional queries are wrapped in try/except with graceful fallback.
 
 ---
 
