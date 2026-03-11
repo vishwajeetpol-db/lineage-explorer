@@ -1,60 +1,73 @@
 """
 Generate 150 tables with cross-dependencies across 6 business domains.
 
+Authentication uses the Databricks SDK unified auth — supports both:
+  - Service Principal: set DATABRICKS_HOST, DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET
+  - Personal Access Token: set DATABRICKS_HOST, DATABRICKS_TOKEN
+
 Usage:
+    # Service Principal (recommended):
     export DATABRICKS_HOST="https://your-workspace.cloud.databricks.com"
-    export DATABRICKS_TOKEN="dapiXXXXXXXXXXXXXXXX"
+    export DATABRICKS_CLIENT_ID="your-sp-client-id"
+    export DATABRICKS_CLIENT_SECRET="your-sp-secret"
     export DATABRICKS_WAREHOUSE_ID="your_warehouse_id"
     export STRESS_TEST_CATALOG="your_catalog"
     export STRESS_TEST_SCHEMA="lineage_stress_test"
     python3 generate_stress_test.py
+
+    # Personal Access Token (alternative):
+    export DATABRICKS_HOST="https://your-workspace.cloud.databricks.com"
+    export DATABRICKS_TOKEN="dapiXXXXXXXXXXXXXXXX"
+    export DATABRICKS_WAREHOUSE_ID="your_warehouse_id"
+    export STRESS_TEST_CATALOG="your_catalog"
+    python3 generate_stress_test.py
 """
 import os
-import requests
-import json
 import time
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import StatementState
 
-HOST = os.environ.get("DATABRICKS_HOST", "")
-TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
 WH = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
 CATALOG = os.environ.get("STRESS_TEST_CATALOG", "")
 SCHEMA = os.environ.get("STRESS_TEST_SCHEMA", "lineage_stress_test")
 
-if not all([HOST, TOKEN, WH, CATALOG]):
+if not all([WH, CATALOG]):
     raise SystemExit(
-        "Missing required environment variables. Set: DATABRICKS_HOST, "
-        "DATABRICKS_TOKEN, DATABRICKS_WAREHOUSE_ID, STRESS_TEST_CATALOG"
+        "Missing required environment variables.\n"
+        "Set: DATABRICKS_WAREHOUSE_ID, STRESS_TEST_CATALOG\n"
+        "Auth: set DATABRICKS_HOST + either DATABRICKS_CLIENT_ID/DATABRICKS_CLIENT_SECRET (SP) "
+        "or DATABRICKS_TOKEN (PAT)"
     )
 
+# WorkspaceClient auto-detects auth from env vars (SP OAuth or PAT)
+client = WorkspaceClient()
 FQ = f"{CATALOG}.{SCHEMA}"
 
+
 def run_sql(sql, label=""):
-    resp = requests.post(
-        f"{HOST}/api/2.0/sql/statements",
-        headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"},
-        json={"statement": sql, "warehouse_id": WH, "catalog": CATALOG, "schema": SCHEMA, "wait_timeout": "50s"},
-    )
-    data = resp.json()
-    state = data.get("status", {}).get("state", "UNKNOWN")
-    if state == "SUCCEEDED":
-        print(f"  OK: {label}")
-    else:
-        stmt_id = data.get("statement_id")
-        if state in ("PENDING", "RUNNING") and stmt_id:
-            for _ in range(20):
-                time.sleep(3)
-                poll = requests.get(f"{HOST}/api/2.0/sql/statements/{stmt_id}", headers={"Authorization": f"Bearer {TOKEN}"}).json()
-                state = poll.get("status", {}).get("state")
-                if state == "SUCCEEDED":
-                    print(f"  OK: {label}")
-                    return
-                if state == "FAILED":
-                    print(f"  FAIL: {label} - {poll.get('status',{}).get('error',{}).get('message','')[:80]}")
-                    return
-            print(f"  TIMEOUT: {label}")
+    try:
+        resp = client.statement_execution.execute_statement(
+            statement=sql,
+            warehouse_id=WH,
+            catalog=CATALOG,
+            schema=SCHEMA,
+            wait_timeout="50s",
+        )
+        # Poll if still pending
+        for _ in range(20):
+            if resp.status.state in (StatementState.SUCCEEDED, StatementState.FAILED,
+                                     StatementState.CANCELED, StatementState.CLOSED):
+                break
+            time.sleep(3)
+            resp = client.statement_execution.get_statement(resp.statement_id)
+
+        if resp.status.state == StatementState.SUCCEEDED:
+            print(f"  OK: {label}")
         else:
-            err = data.get("status", {}).get("error", {}).get("message", "")[:80]
+            err = resp.status.error.message[:80] if resp.status.error else str(resp.status.state)
             print(f"  FAIL: {label} - {err}")
+    except Exception as e:
+        print(f"  ERR: {label} - {str(e)[:80]}")
 
 # ============================================================
 # DOMAIN DEFINITIONS

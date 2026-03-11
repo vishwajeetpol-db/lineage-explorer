@@ -33,20 +33,31 @@ Understanding data lineage is critical for data governance, impact analysis, and
 │  │  lineage     │     │  Client-side column lineage  │  │
 │  └──────┬───────┘     └──────────────────────────────┘  │
 │         │                                               │
-│         │  Databricks SDK                               │
-│         │  (SQL Statement Execution API)                │
+│         │  Databricks SDK (unified auth)                │
+│         │  Supports: SP OAuth M2M, PAT, Azure MSI,     │
+│         │  OAuth U2M, and Databricks App auto-auth      │
 │         ▼                                               │
-│  ┌──────────────────────────────────┐                   │
-│  │  Unity Catalog                   │                   │
-│  │  • information_schema.tables     │                   │
-│  │  • information_schema.columns    │                   │
-│  │  • information_schema.views      │                   │
-│  │  • system.access.table_lineage   │                   │
-│  │  • system.access.column_lineage  │                   │
-│  │  • system.query.history          │                   │
-│  └──────────────────────────────────┘                   │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │  Unity Catalog                                    │   │
+│  │  • information_schema.tables / columns / views    │   │
+│  │  • system.access.table_lineage / column_lineage   │   │
+│  │  • system.query.history                           │   │
+│  └──────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────┘
 ```
+
+### Authentication Model
+
+This app uses the **Databricks SDK unified authentication**, which auto-detects credentials from environment variables. It supports multiple auth methods — no code changes needed:
+
+| Method | Env Vars Required | Use Case |
+|--------|------------------|----------|
+| **Databricks App (auto)** | None — injected automatically | Production: running as a Databricks App |
+| **Service Principal (OAuth M2M)** | `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET` | CI/CD, automation, standalone deployment |
+| **Personal Access Token** | `DATABRICKS_HOST`, `DATABRICKS_TOKEN` | Local development only (not recommended for prod) |
+| **Azure Managed Identity** | `DATABRICKS_HOST`, `ARM_CLIENT_ID` | Azure-hosted environments |
+
+**When deployed as a Databricks App**, the app's built-in service principal is used automatically — no credentials need to be configured. The SDK detects the runtime environment and authenticates via the app's SPN.
 
 ### Lineage Inference Strategy
 
@@ -79,7 +90,7 @@ Column lineage is computed entirely in the browser for instant response (~<10ms)
 | **UI Primitives** | [Radix UI](https://www.radix-ui.com/) | Accessible dropdown, toggle, dialog components |
 | **Build Tool** | [Vite](https://vitejs.dev/) | Fast dev server and production bundler |
 | **Backend** | [FastAPI](https://fastapi.tiangolo.com/) + [Uvicorn](https://www.uvicorn.org/) | Async Python API server |
-| **Databricks SDK** | [databricks-sdk](https://docs.databricks.com/dev-tools/sdk-python.html) | SQL Statement Execution API for metadata queries |
+| **Databricks SDK** | [databricks-sdk](https://docs.databricks.com/dev-tools/sdk-python.html) | Unified auth + SQL Statement Execution API |
 | **Deployment** | [Databricks Apps](https://docs.databricks.com/dev-tools/databricks-apps/index.html) + [DABs](https://docs.databricks.com/dev-tools/bundles/index.html) | Hosted app with OAuth SSO, CI/CD pipeline |
 
 ---
@@ -138,7 +149,8 @@ lineage-explorer/
 ## Prerequisites
 
 - **Databricks Workspace** with Unity Catalog enabled
-- **SQL Warehouse** (serverless or pro) accessible from the app
+- **SQL Warehouse** (serverless or pro) accessible from the app's service principal
+- **Service Principal** with OAuth secret (for deployment and runtime auth)
 - **Databricks CLI** v0.200+ (for deployment)
 - **Node.js** 18+ and **npm** (for frontend build)
 - **Python** 3.10+ (for backend)
@@ -147,7 +159,45 @@ lineage-explorer/
 
 ## Setup & Deployment
 
-### 1. Clone and Install
+### 1. Create a Service Principal
+
+In Databricks Account Console or via the CLI:
+
+```bash
+# Create the service principal
+databricks account service-principals create \
+  --display-name "lineage-explorer-sp" \
+  --profile your-account-profile
+
+# Note the application_id (client_id) from the output
+# Then create an OAuth secret for it:
+databricks account service-principals secrets create \
+  --service-principal-id <sp-id> \
+  --profile your-account-profile
+
+# Note the secret value — this is shown only once
+```
+
+Or create via the Databricks UI: **Account Console > User Management > Service Principals > Add Service Principal > Generate OAuth Secret**.
+
+### 2. Configure Databricks CLI for SP Auth
+
+```bash
+# Create a CLI profile using the service principal
+databricks auth login \
+  --host https://your-workspace.cloud.databricks.com \
+  --client-id <sp-client-id> \
+  --client-secret <sp-secret> \
+  --profile sp-lineage
+```
+
+Verify it works:
+```bash
+databricks auth profiles | grep sp-lineage
+# Should show: sp-lineage  https://your-workspace...  YES
+```
+
+### 3. Clone and Install
 
 ```bash
 git clone <repo-url> && cd lineage-explorer
@@ -164,7 +214,7 @@ npm run build
 cd ..
 ```
 
-### 2. Configure
+### 4. Configure
 
 Edit `databricks.yml`:
 - Set `workspace.host` to your Databricks workspace URL
@@ -173,80 +223,125 @@ Edit `databricks.yml`:
 Edit `app.yaml`:
 - Set `DATABRICKS_WAREHOUSE_ID` to your SQL warehouse ID
 
-### 3. Authenticate
-
-```bash
-databricks auth login --host https://your-workspace.cloud.databricks.com --profile my-workspace
-```
-
-### 4. Create the Databricks App
+### 5. Create the Databricks App
 
 ```bash
 databricks apps create lineage-explorer \
   --description "Unity Catalog Lineage Explorer" \
-  --profile my-workspace
+  --profile sp-lineage
 ```
 
-### 5. Grant Permissions to the App Service Principal
+This creates the app and its **auto-generated service principal** (different from your deployment SP). The app SPN is what the running app uses to authenticate with Databricks at runtime.
 
-After creating the app, Databricks generates a service principal (SPN) for it. Grant it access to your catalog:
+### 6. Grant Permissions to the App Service Principal
+
+Get the app's SPN client ID:
+```bash
+databricks apps get lineage-explorer --profile sp-lineage -o json \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['service_principal_client_id'])"
+```
+
+Then grant it access (run as a user with appropriate privileges):
 
 ```sql
--- Replace <spn-client-id> with the app's service_principal_client_id
-GRANT USE CATALOG ON CATALOG your_catalog TO `<spn-client-id>`;
-GRANT USE SCHEMA ON SCHEMA your_catalog.your_schema TO `<spn-client-id>`;
-GRANT SELECT ON SCHEMA your_catalog.your_schema TO `<spn-client-id>`;
+-- Replace <app-spn-client-id> with the app's service_principal_client_id
+-- Catalog access
+GRANT USE CATALOG ON CATALOG your_catalog TO `<app-spn-client-id>`;
+GRANT BROWSE ON CATALOG your_catalog TO `<app-spn-client-id>`;
+
+-- Schema access (repeat for each schema the app should visualize)
+GRANT USE SCHEMA ON SCHEMA your_catalog.your_schema TO `<app-spn-client-id>`;
+GRANT SELECT ON SCHEMA your_catalog.your_schema TO `<app-spn-client-id>`;
+
+-- SQL warehouse access
+GRANT CAN_USE ON WAREHOUSE your_warehouse TO `<app-spn-client-id>`;
 
 -- For system lineage tables (requires metastore admin):
-GRANT USE CATALOG ON CATALOG system TO `<spn-client-id>`;
-GRANT USE SCHEMA ON SCHEMA system.access TO `<spn-client-id>`;
-GRANT SELECT ON SCHEMA system.access TO `<spn-client-id>`;
-GRANT USE SCHEMA ON SCHEMA system.query TO `<spn-client-id>`;
-GRANT SELECT ON SCHEMA system.query TO `<spn-client-id>`;
+GRANT USE CATALOG ON CATALOG system TO `<app-spn-client-id>`;
+GRANT USE SCHEMA ON SCHEMA system.access TO `<app-spn-client-id>`;
+GRANT SELECT ON SCHEMA system.access TO `<app-spn-client-id>`;
+GRANT USE SCHEMA ON SCHEMA system.query TO `<app-spn-client-id>`;
+GRANT SELECT ON SCHEMA system.query TO `<app-spn-client-id>`;
 ```
 
-> **Note:** If you don't have metastore admin access to grant system catalog permissions, the app will automatically fall back to the inference-based lineage strategy.
+> **Note:** If you don't have metastore admin access to grant system catalog permissions, the app will automatically fall back to the inference-based lineage strategy. The app is fully functional without system table access.
 
-### 6. Deploy
+### 7. Deploy
 
 ```bash
-# Upload source code
+# Upload source code to workspace
 databricks workspace import-dir . \
   /Workspace/Users/you@company.com/lineage-explorer \
-  --overwrite --profile my-workspace
+  --overwrite --profile sp-lineage
 
 # Start the app (if not already running)
-databricks apps start lineage-explorer --profile my-workspace
+databricks apps start lineage-explorer --profile sp-lineage
 
 # Deploy
 databricks apps deploy lineage-explorer \
   --source-code-path /Workspace/Users/you@company.com/lineage-explorer \
-  --profile my-workspace
+  --profile sp-lineage
 ```
 
 Or use DABs:
 ```bash
-databricks bundle deploy --target dev --profile my-workspace
+databricks bundle deploy --target dev --profile sp-lineage \
+  --var="warehouse_id=your_warehouse_id"
 ```
 
-### 7. Access
+### 8. Access
 
 The app URL will be shown after deployment. It follows the pattern:
 ```
 https://lineage-explorer-<workspace-id>.aws.databricksapps.com
 ```
 
-Login is handled automatically via Databricks OAuth SSO.
+Login is handled automatically via Databricks OAuth SSO. Users accessing the app authenticate with their own Databricks identity — the app's SPN handles backend API calls.
+
+---
+
+## Authentication Reference
+
+### How auth works at each stage
+
+| Stage | Who authenticates | Method |
+|-------|------------------|--------|
+| **CLI deployment** (`databricks apps deploy`) | Your deployment SP or user | SP OAuth M2M via `--profile` |
+| **App runtime** (backend API calls) | App's auto-generated SPN | Automatic — injected by Databricks Apps runtime |
+| **User access** (browser) | End user | Databricks OAuth SSO — transparent redirect |
+| **Stress test script** | Your SP or user | SP OAuth M2M or PAT via env vars |
+
+### Service Principal vs Personal Access Token
+
+| | Service Principal (SP) | Personal Access Token (PAT) |
+|-|----------------------|---------------------------|
+| **Auth type** | OAuth 2.0 client credentials (M2M) | Static bearer token |
+| **Expiration** | Secret has configurable lifetime | Configurable (default 90 days) |
+| **Identity** | Machine identity, auditable | Tied to a human user |
+| **Rotation** | Generate new secret, revoke old | Regenerate token |
+| **Recommended for** | Production, CI/CD, automation | Local dev only |
+| **Env vars** | `DATABRICKS_CLIENT_ID` + `DATABRICKS_CLIENT_SECRET` | `DATABRICKS_TOKEN` |
+
+### Minimal SP permissions for this app
+
+The app's auto-generated service principal needs:
+- `USE CATALOG` + `BROWSE` on target catalogs
+- `USE SCHEMA` + `SELECT` on target schemas
+- `CAN_USE` on the SQL warehouse
+- (Optional) `SELECT` on `system.access` and `system.query` schemas for system lineage tables
 
 ---
 
 ## Local Development
 
+### With Service Principal (recommended)
+
 ```bash
 # Terminal 1 — Backend
 source .venv/bin/activate
 export DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
-export DATABRICKS_TOKEN=dapiXXXXXXXX
+export DATABRICKS_CLIENT_ID=your-sp-client-id
+export DATABRICKS_CLIENT_SECRET=your-sp-secret
 export DATABRICKS_WAREHOUSE_ID=your_warehouse_id
 uvicorn backend.main:app --reload --port 8000
 
@@ -255,21 +350,36 @@ cd frontend
 npm run dev    # Starts on http://localhost:5173, proxies /api to :8000
 ```
 
+### With PAT (alternative for quick local testing)
+
+```bash
+# Terminal 1 — Backend
+source .venv/bin/activate
+export DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
+export DATABRICKS_TOKEN=dapiXXXXXXXX
+export DATABRICKS_WAREHOUSE_ID=your_warehouse_id
+uvicorn backend.main:app --reload --port 8000
+```
+
 ---
 
 ## Stress Testing
 
 The included `generate_stress_test.py` creates 150 tables across 6 business domains (ecommerce, finance, HR, marketing, supply chain, support) with bronze/silver/gold layers and cross-domain dependencies.
 
+It uses the Databricks SDK for authentication — works with both SP and PAT.
+
 ```bash
+# With Service Principal:
 export DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
-export DATABRICKS_TOKEN=dapiXXXXXXXX
+export DATABRICKS_CLIENT_ID=your-sp-client-id
+export DATABRICKS_CLIENT_SECRET=your-sp-secret
 export DATABRICKS_WAREHOUSE_ID=your_warehouse_id
 export STRESS_TEST_CATALOG=your_catalog
 export STRESS_TEST_SCHEMA=lineage_stress_test
 
-# Create the schema first
-# (run in Databricks SQL): CREATE SCHEMA your_catalog.lineage_stress_test;
+# Create the schema first (run in Databricks SQL):
+#   CREATE SCHEMA your_catalog.lineage_stress_test;
 
 python3 generate_stress_test.py
 ```
@@ -286,6 +396,7 @@ python3 generate_stress_test.py
 - **Responsive layout** — ELK.js layered algorithm handles complex DAGs with minimal edge crossings
 - **Animated edges** — Glowing indigo edges with animated dashes and traveling dots for highlighted paths
 - **Type indicators** — Color-coded badges for TABLE (blue), VIEW (green), MATERIALIZED VIEW (amber)
+- **Zoom persistence** — Zoom in to read table names on large schemas; your zoom level is preserved when selecting/hovering tables
 
 ---
 
