@@ -7,7 +7,7 @@ command:
   - 8000
 env:
   - name: DATABRICKS_WAREHOUSE_ID
-    value: "your_warehouse_id"
+    value: "9711dcb3942dac99"
   # When running as a Databricks App, auth is automatic via the app's
   # built-in service principal — no need to set credentials below.
   #

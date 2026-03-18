@@ -21,6 +21,7 @@ All optional queries are wrapped in try/except — the app degrades gracefully.
 """
 
 import os
+import time
 import logging
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementState
@@ -34,9 +35,50 @@ from backend.models import (
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Singleton WorkspaceClient — avoids per-request auth handshake overhead
+# ---------------------------------------------------------------------------
+_client_instance: WorkspaceClient | None = None
+
 
 def _get_client() -> WorkspaceClient:
-    return WorkspaceClient()
+    global _client_instance
+    if _client_instance is None:
+        _client_instance = WorkspaceClient()
+    return _client_instance
+
+
+# ---------------------------------------------------------------------------
+# TTL cache — eliminates redundant DBSQL queries for concurrent users
+# ---------------------------------------------------------------------------
+_cache: dict[str, tuple[float, object]] = {}
+CACHE_TTL_SECONDS = 300  # 5 minutes
+
+
+def _cache_get(key: str):
+    """Return cached value if present and not expired, else None."""
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    ts, val = entry
+    if time.time() - ts > CACHE_TTL_SECONDS:
+        del _cache[key]
+        return None
+    return val
+
+
+def _cache_set(key: str, val: object):
+    _cache[key] = (time.time(), val)
+
+
+def invalidate_cache(prefix: str = ""):
+    """Clear all cache entries, or only those matching a prefix."""
+    if not prefix:
+        _cache.clear()
+    else:
+        for k in list(_cache):
+            if k.startswith(prefix):
+                del _cache[k]
 
 
 def _execute_sql(client: WorkspaceClient, sql: str, catalog: str = None) -> list[dict]:
@@ -72,28 +114,33 @@ def _execute_sql(client: WorkspaceClient, sql: str, catalog: str = None) -> list
 
 def list_catalogs() -> list[str]:
     """List catalogs using the Unity Catalog API (no system catalog access needed)."""
+    cached = _cache_get("catalogs")
+    if cached is not None:
+        return cached
     client = _get_client()
     skip = {"system", "__databricks_internal"}
     try:
-        # Use the UC API — only returns catalogs the SPN has privileges on.
-        # Does NOT require access to the system catalog.
         catalogs = list(client.catalogs.list())
-        return sorted([c.name for c in catalogs if c.name and c.name not in skip])
+        result = sorted([c.name for c in catalogs if c.name and c.name not in skip])
     except Exception as e:
         logger.warning(f"UC catalog list API failed, falling back to SQL: {e}")
-        # Fallback to SQL (requires system catalog access)
         rows = _execute_sql(client, "SELECT catalog_name FROM system.information_schema.catalogs ORDER BY catalog_name")
-        return [r["catalog_name"] for r in rows if r["catalog_name"] not in skip]
+        result = [r["catalog_name"] for r in rows if r["catalog_name"] not in skip]
+    _cache_set("catalogs", result)
+    return result
 
 
 def list_schemas(catalog: str) -> list[str]:
     """List schemas using the Unity Catalog API (no system catalog access needed)."""
+    cache_key = f"schemas:{catalog}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
     client = _get_client()
     skip = {"information_schema", "default"}
     try:
-        # Use the UC API — only returns schemas the SPN has privileges on.
         schemas = list(client.schemas.list(catalog_name=catalog))
-        return sorted([s.name for s in schemas if s.name and s.name not in skip])
+        result = sorted([s.name for s in schemas if s.name and s.name not in skip])
     except Exception as e:
         logger.warning(f"UC schema list API failed, falling back to SQL: {e}")
         rows = _execute_sql(
@@ -101,7 +148,9 @@ def list_schemas(catalog: str) -> list[str]:
             f"SELECT schema_name FROM `{catalog}`.information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'default') ORDER BY schema_name",
             catalog=catalog,
         )
-        return [r["schema_name"] for r in rows]
+        result = [r["schema_name"] for r in rows]
+    _cache_set(cache_key, result)
+    return result
 
 
 def _infer_lineage(client: WorkspaceClient, catalog: str, schema: str, schema_tables: set[str]) -> list[dict]:
@@ -248,6 +297,11 @@ def _infer_lineage(client: WorkspaceClient, catalog: str, schema: str, schema_ta
 
 
 def get_table_lineage(catalog: str, schema: str) -> LineageResponse:
+    cache_key = f"lineage:{catalog}.{schema}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     client = _get_client()
     full_schema = f"{catalog}.{schema}"
 
@@ -266,7 +320,7 @@ def get_table_lineage(catalog: str, schema: str) -> LineageResponse:
     """
     table_rows = _execute_sql(client, tables_sql, catalog=catalog)
 
-    # Get columns for all tables
+    # Get columns for all tables (needed for lineage inference heuristics)
     columns_sql = f"""
     SELECT
         table_name,
@@ -291,6 +345,10 @@ def get_table_lineage(catalog: str, schema: str) -> LineageResponse:
             "type": col["data_type"],
             "nullable": col["is_nullable"] == "YES",
         })
+
+    # Cache columns separately for the lazy /api/columns endpoint
+    for tname, cols in columns_by_table.items():
+        _cache_set(f"columns:{catalog}.{schema}.{tname}", cols)
 
     # Pre-build schema_tables set for lineage filtering
     schema_tables = set()
@@ -356,10 +414,31 @@ def get_table_lineage(catalog: str, schema: str) -> LineageResponse:
         node.upstream_count = upstream_count.get(node_id, 0)
         node.downstream_count = downstream_count.get(node_id, 0)
 
-    return LineageResponse(
+    result = LineageResponse(
         nodes=list(nodes_map.values()),
         edges=edges,
     )
+    _cache_set(cache_key, result)
+    return result
+
+
+def get_columns(catalog: str, schema: str, table: str) -> list[dict]:
+    """Lazy column loader — returns columns for a single table (cache-first)."""
+    cache_key = f"columns:{catalog}.{schema}.{table}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    client = _get_client()
+    sql = f"""
+    SELECT column_name, data_type, is_nullable, ordinal_position
+    FROM `{catalog}`.information_schema.columns
+    WHERE table_schema = '{schema}' AND table_name = '{table}'
+    ORDER BY ordinal_position
+    """
+    rows = _execute_sql(client, sql, catalog=catalog)
+    cols = [{"name": r["column_name"], "type": r["data_type"], "nullable": r["is_nullable"] == "YES"} for r in rows]
+    _cache_set(cache_key, cols)
+    return cols
 
 
 def get_column_lineage(catalog: str, schema: str, table: str, column: str) -> ColumnLineageResponse:

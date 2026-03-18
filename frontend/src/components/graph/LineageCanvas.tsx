@@ -99,7 +99,7 @@ function LineageCanvas() {
     return edgeSet;
   }, [connectedNodes, rawEdges, selectedNode, hoveredNode]);
 
-  // Compute column lineage client-side (instant, no API call)
+  // Compute column lineage client-side with full transitive traversal
   useEffect(() => {
     if (!selectedColumn) {
       setColumnEdges([]);
@@ -108,34 +108,47 @@ function LineageCanvas() {
     const { table: selTable, column: selCol } = selectedColumn;
     const colLower = selCol.toLowerCase();
     const inferred: { source_table: string; source_column: string; target_table: string; target_column: string }[] = [];
+    const edgesSeen = new Set<string>();
 
-    // Build column lookup: tableId -> Set<columnName>
+    // Build column lookup: tableId -> Set<columnName (lowercase)>
     const colsByTable = new Map<string, Set<string>>();
     for (const node of rawNodes) {
       colsByTable.set(node.id, new Set(node.columns.map((c) => c.name.toLowerCase())));
     }
 
-    // Find upstream tables (tables that feed into this table)
-    const upstreamTables = new Set<string>();
-    const downstreamTables = new Set<string>();
-    for (const edge of rawEdges) {
-      if (edge.target === selTable) upstreamTables.add(edge.source);
-      if (edge.source === selTable) downstreamTables.add(edge.target);
-    }
+    const addEdge = (src: string, tgt: string) => {
+      const key = `${src}|${tgt}`;
+      if (edgesSeen.has(key)) return;
+      edgesSeen.add(key);
+      inferred.push({ source_table: src, source_column: selCol, target_table: tgt, target_column: selCol });
+    };
 
-    // Match: if upstream table has same column name, it flows into this table
-    for (const upTable of upstreamTables) {
-      if (colsByTable.get(upTable)?.has(colLower)) {
-        inferred.push({ source_table: upTable, source_column: selCol, target_table: selTable, target_column: selCol });
+    // Recursively trace upstream: find all tables that feed the column into this table
+    const traceUpstream = (tableId: string, visited: Set<string>) => {
+      if (visited.has(tableId)) return;
+      visited.add(tableId);
+      for (const edge of rawEdges) {
+        if (edge.target === tableId && colsByTable.get(edge.source)?.has(colLower)) {
+          addEdge(edge.source, tableId);
+          traceUpstream(edge.source, visited);
+        }
       }
-    }
+    };
 
-    // Match: if downstream table has same column name, this table feeds it
-    for (const downTable of downstreamTables) {
-      if (colsByTable.get(downTable)?.has(colLower)) {
-        inferred.push({ source_table: selTable, source_column: selCol, target_table: downTable, target_column: selCol });
+    // Recursively trace downstream: find all tables this column flows into
+    const traceDownstream = (tableId: string, visited: Set<string>) => {
+      if (visited.has(tableId)) return;
+      visited.add(tableId);
+      for (const edge of rawEdges) {
+        if (edge.source === tableId && colsByTable.get(edge.target)?.has(colLower)) {
+          addEdge(tableId, edge.target);
+          traceDownstream(edge.target, visited);
+        }
       }
-    }
+    };
+
+    traceUpstream(selTable, new Set<string>());
+    traceDownstream(selTable, new Set<string>());
 
     setColumnEdges(inferred);
   }, [selectedColumn, rawNodes, rawEdges, setColumnEdges]);
