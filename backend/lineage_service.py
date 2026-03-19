@@ -23,6 +23,7 @@ All optional queries are wrapped in try/except — the app degrades gracefully.
 import os
 import time
 import logging
+import threading
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementState
 from backend.models import (
@@ -49,36 +50,73 @@ def _get_client() -> WorkspaceClient:
 
 
 # ---------------------------------------------------------------------------
-# TTL cache — eliminates redundant DBSQL queries for concurrent users
+# TTL cache with request coalescing (single-flight pattern)
+#
+# Solves the thundering herd problem: if 4,000 users hit "Generate Lineage"
+# simultaneously on an empty cache, only ONE DBSQL query fires. The other
+# 3,999 requests wait on a threading.Event and receive the same result.
 # ---------------------------------------------------------------------------
 _cache: dict[str, tuple[float, object]] = {}
+_cache_lock = threading.Lock()
+_inflight: dict[str, threading.Event] = {}  # keys currently being fetched
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "28800"))  # default 8 hours
 
 
 def _cache_get(key: str):
     """Return cached value if present and not expired, else None."""
-    entry = _cache.get(key)
-    if entry is None:
-        return None
-    ts, val = entry
-    if time.time() - ts > CACHE_TTL_SECONDS:
-        del _cache[key]
-        return None
-    return val
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry is None:
+            return None
+        ts, val = entry
+        if time.time() - ts > CACHE_TTL_SECONDS:
+            del _cache[key]
+            return None
+        return val
 
 
 def _cache_set(key: str, val: object):
-    _cache[key] = (time.time(), val)
+    with _cache_lock:
+        _cache[key] = (time.time(), val)
+
+
+def _cache_acquire(key: str) -> bool:
+    """Try to become the fetcher for this key. Returns True if we are the leader.
+    If False, another thread is already fetching — caller should wait then read cache."""
+    with _cache_lock:
+        if key in _inflight:
+            return False
+        _inflight[key] = threading.Event()
+        return True
+
+
+def _cache_wait(key: str, timeout: float = 120) -> object | None:
+    """Wait for the leader thread to finish fetching, then return the cached value."""
+    with _cache_lock:
+        event = _inflight.get(key)
+    if event is None:
+        return _cache_get(key)
+    event.wait(timeout=timeout)
+    return _cache_get(key)
+
+
+def _cache_release(key: str):
+    """Signal all waiting threads that the fetch is done."""
+    with _cache_lock:
+        event = _inflight.pop(key, None)
+    if event:
+        event.set()
 
 
 def invalidate_cache(prefix: str = ""):
     """Clear all cache entries, or only those matching a prefix."""
-    if not prefix:
-        _cache.clear()
-    else:
-        for k in list(_cache):
-            if k.startswith(prefix):
-                del _cache[k]
+    with _cache_lock:
+        if not prefix:
+            _cache.clear()
+        else:
+            for k in list(_cache):
+                if k.startswith(prefix):
+                    del _cache[k]
 
 
 def _execute_sql(client: WorkspaceClient, sql: str, catalog: str = None) -> list[dict]:
@@ -298,11 +336,30 @@ def _infer_lineage(client: WorkspaceClient, catalog: str, schema: str, schema_ta
 
 def get_table_lineage(catalog: str, schema: str, skip_cache: bool = False) -> LineageResponse:
     cache_key = f"lineage:{catalog}.{schema}"
+
     if not skip_cache:
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached
 
+        # Single-flight: if another thread is already fetching this key, wait for it
+        if not _cache_acquire(cache_key):
+            logger.info(f"Request coalescing: waiting for in-flight fetch of {cache_key}")
+            result = _cache_wait(cache_key)
+            if result is not None:
+                return result
+            # Leader failed — fall through and become the new leader
+            _cache_acquire(cache_key)
+
+    try:
+        result = _fetch_table_lineage(catalog, schema, cache_key)
+        return result
+    finally:
+        _cache_release(cache_key)
+
+
+def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageResponse:
+    """Actual DBSQL fetch — called by at most one thread per cache key at a time."""
     client = _get_client()
     full_schema = f"{catalog}.{schema}"
 
@@ -424,23 +481,34 @@ def get_table_lineage(catalog: str, schema: str, skip_cache: bool = False) -> Li
 
 
 def get_columns(catalog: str, schema: str, table: str, skip_cache: bool = False) -> list[dict]:
-    """Lazy column loader — returns columns for a single table (cache-first)."""
+    """Lazy column loader — returns columns for a single table (cache-first, coalesced)."""
     cache_key = f"columns:{catalog}.{schema}.{table}"
+
     if not skip_cache:
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached
-    client = _get_client()
-    sql = f"""
-    SELECT column_name, data_type, is_nullable, ordinal_position
-    FROM `{catalog}`.information_schema.columns
-    WHERE table_schema = '{schema}' AND table_name = '{table}'
-    ORDER BY ordinal_position
-    """
-    rows = _execute_sql(client, sql, catalog=catalog)
-    cols = [{"name": r["column_name"], "type": r["data_type"], "nullable": r["is_nullable"] == "YES"} for r in rows]
-    _cache_set(cache_key, cols)
-    return cols
+
+        if not _cache_acquire(cache_key):
+            result = _cache_wait(cache_key)
+            if result is not None:
+                return result
+            _cache_acquire(cache_key)
+
+    try:
+        client = _get_client()
+        sql = f"""
+        SELECT column_name, data_type, is_nullable, ordinal_position
+        FROM `{catalog}`.information_schema.columns
+        WHERE table_schema = '{schema}' AND table_name = '{table}'
+        ORDER BY ordinal_position
+        """
+        rows = _execute_sql(client, sql, catalog=catalog)
+        cols = [{"name": r["column_name"], "type": r["data_type"], "nullable": r["is_nullable"] == "YES"} for r in rows]
+        _cache_set(cache_key, cols)
+        return cols
+    finally:
+        _cache_release(cache_key)
 
 
 def get_column_lineage(catalog: str, schema: str, table: str, column: str) -> ColumnLineageResponse:

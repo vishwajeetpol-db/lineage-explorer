@@ -407,6 +407,64 @@ python3 generate_stress_test.py
 
 ---
 
+## Concurrency & Thundering Herd Protection
+
+### Scenario 1: Warm cache + 4,000 concurrent users
+
+When the cache is already populated (most common scenario after first load):
+
+1. All 4,000 requests hit **in-memory cache** — a Python dict lookup
+2. Zero DBSQL queries fired
+3. **Expected latency: <1ms per request** (limited only by FastAPI HTTP overhead)
+4. The in-memory cache is shared across all threads in the same process
+
+### Scenario 2: Cold cache + 4,000 concurrent users (thundering herd)
+
+When 4,000 users click "Generate Lineage" simultaneously on a fresh app (or after cache expiry):
+
+**Without protection:** All 4,000 requests would fan out to DBSQL, overwhelming the warehouse with 4,000 duplicate queries for the same data.
+
+**With request coalescing (implemented):** The app uses a single-flight pattern:
+
+1. The **first request** acquires a lock and becomes the "leader" — it queries DBSQL system tables
+2. The remaining **3,999 requests** detect an in-flight fetch for the same cache key and **wait on a `threading.Event`**
+3. When the leader completes (7-18s), it stores the result in cache and signals all waiters
+4. All 3,999 waiting threads read from cache and return immediately
+
+**Result:** Only 1 DBSQL query fires, regardless of concurrency. Total wall-clock time = time for a single query + negligible signal propagation.
+
+| Phase | Queries Fired | p50 Latency | p95 Latency |
+|-------|--------------|-------------|-------------|
+| Cold cache, first request | 1 | ~10s | ~18s |
+| All subsequent (warm) | 0 | <1ms | <1ms |
+
+---
+
+## Cost & Performance Comparison (All Options)
+
+Three deployment options exist for this app. This repo is **Option 1 (Direct)**.
+
+| Dimension | Option 1: Direct (this repo) | Option 2: Delta Cache | Option 3: Lakebase |
+|-----------|-----------------------------|-----------------------|-------------------|
+| **Architecture** | In-memory TTL only | In-memory → Delta tables → DBSQL | In-memory → Lakebase PostgreSQL → DBSQL |
+| **Warm cache latency** | <1ms | <1ms | <1ms |
+| **Cold cache latency** | 7-18s (DBSQL) | 200-800ms (Delta via DBSQL) | 30ms (Lakebase PostgreSQL) |
+| **Thundering herd** | 1 DBSQL query (coalesced) | 1 DBSQL query (coalesced) | 1 Lakebase query (coalesced) |
+| **Cache survives restart** | No | Yes (Delta tables) | Yes (PostgreSQL) |
+| **DBSQL warehouse** | Required (reads) | Required (reads + cache) | Required (refresh job only) |
+| **Additional infra** | None | Serverless job | Lakebase project + serverless job |
+| **Monthly cost estimate** | ~$55-65 | ~$60-77 | ~$95-117 |
+| **Best for** | Low traffic, simple setup | Medium traffic, cost-sensitive | High traffic (4000+ users), production |
+
+**Cost breakdown:**
+- **Option 1:** DBSQL warehouse (always-on for user queries) ~$50-60/mo + App compute ~$5/mo
+- **Option 2:** DBSQL warehouse ~$50-60/mo + refresh job ~$5-12/mo + App compute ~$5/mo
+- **Option 3:** DBSQL warehouse (refresh only, can be on-demand) ~$20-30/mo + Lakebase ~$40-55/mo + refresh job ~$5-12/mo + App compute ~$5/mo
+
+**Recommendation:** Option 1 (this repo) for demos and low traffic. Option 3 for production with high concurrency and sub-second cold reads.
+
+---
+
 ## Features
 
 - **Interactive DAG** — Pan, zoom, minimap navigation across large schemas
