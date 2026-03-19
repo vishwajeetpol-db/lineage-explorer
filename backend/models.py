@@ -31,6 +31,8 @@ class ColumnLineageEdge(BaseModel):
 class LineageResponse(BaseModel):
     nodes: list[TableNode]
     edges: list[LineageEdge]
+    cached: bool = False
+    cached_at: Optional[str] = None
 
 
 class ColumnLineageResponse(BaseModel):

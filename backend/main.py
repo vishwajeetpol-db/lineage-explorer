@@ -83,9 +83,11 @@ async def api_list_schemas(catalog: str = Query(...)):
 
 
 @app.get("/api/lineage")
-async def api_get_lineage(catalog: str = Query(...), schema: str = Query(...)):
+async def api_get_lineage(catalog: str = Query(...), schema: str = Query(...), live: bool = Query(False)):
     try:
-        return await asyncio.to_thread(get_table_lineage, catalog, schema)
+        if live:
+            logger.info(f"LIVE MODE: Serving lineage for {catalog}.{schema} direct from system tables")
+        return await asyncio.to_thread(get_table_lineage, catalog, schema, live)
     except Exception as e:
         logger.error(f"Error getting lineage: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -96,10 +98,11 @@ async def api_get_columns(
     catalog: str = Query(...),
     schema: str = Query(...),
     table: str = Query(...),
+    live: bool = Query(False),
 ):
     """Lazy column loader — fetch columns for a single table on demand."""
     try:
-        cols = await asyncio.to_thread(get_columns, catalog, schema, table)
+        cols = await asyncio.to_thread(get_columns, catalog, schema, table, live)
         return {"columns": cols}
     except Exception as e:
         logger.error(f"Error getting columns: {e}")
@@ -112,6 +115,7 @@ async def api_get_column_lineage(
     schema: str = Query(...),
     table: str = Query(...),
     column: str = Query(...),
+    live: bool = Query(False),
 ):
     try:
         return await asyncio.to_thread(get_column_lineage, catalog, schema, table, column)

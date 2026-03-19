@@ -1,8 +1,8 @@
 import { memo, useCallback, useEffect } from "react";
 import { motion } from "framer-motion";
-import { GitBranch, Search, ChevronDown, Columns3 } from "lucide-react";
+import { GitBranch, Search, ChevronDown, Columns3, Zap } from "lucide-react";
 import { useLineageStore } from "../../store/lineageStore";
-import { api } from "../../api/client";
+import { api, setLiveMode } from "../../api/client";
 
 interface Props {
   onGenerate: () => void;
@@ -10,11 +10,19 @@ interface Props {
 
 function Toolbar({ onGenerate }: Props) {
   const {
-    catalog, schema, columnLineageEnabled,
-    catalogs, schemas, loading,
-    setCatalog, setSchema, setColumnLineageEnabled,
+    catalog, schema, columnLineageEnabled, liveMode,
+    catalogs, schemas, loading, cached, cachedAt,
+    setCatalog, setSchema, setColumnLineageEnabled, setLiveMode: setStoreLiveMode,
     setCatalogs, setSchemas, setSearchOpen,
   } = useLineageStore();
+
+  const nodes = useLineageStore((s) => s.nodes);
+
+  const handleLiveModeToggle = useCallback(() => {
+    const next = !liveMode;
+    setStoreLiveMode(next);
+    setLiveMode(next);
+  }, [liveMode, setStoreLiveMode]);
 
   useEffect(() => {
     api.getCatalogs().then((r) => setCatalogs(r.catalogs)).catch(console.error);
@@ -31,6 +39,7 @@ function Toolbar({ onGenerate }: Props) {
   }, [catalog, schema, onGenerate]);
 
   return (
+    <>
     <motion.header
       initial={{ y: -10, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
@@ -100,6 +109,28 @@ function Toolbar({ onGenerate }: Props) {
         </button>
       </div>
 
+      {/* Live Query */}
+      <div className="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+        <Zap size={13} className={liveMode ? "text-amber-400" : "text-slate-500"} />
+        <span className="text-[11px] text-slate-500 font-medium">Live</span>
+        <button
+          onClick={handleLiveModeToggle}
+          className={`
+            relative w-8 h-[18px] rounded-full transition-all duration-300
+            ${liveMode
+              ? "bg-gradient-to-r from-amber-500 to-orange-500 shadow-[0_0_10px_rgba(245,158,11,0.3)]"
+              : "bg-white/[0.06]"
+            }
+          `}
+        >
+          <motion.div
+            animate={{ x: liveMode ? 15 : 2 }}
+            transition={{ type: "spring", stiffness: 500, damping: 30 }}
+            className="absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow-sm"
+          />
+        </button>
+      </div>
+
       {/* Generate */}
       <button
         onClick={handleGenerate}
@@ -144,7 +175,48 @@ function Toolbar({ onGenerate }: Props) {
         </div>
       </button>
     </motion.header>
+    {/* Cache status banner */}
+    {nodes.length > 0 && (
+      <div className={`
+        flex items-center justify-center gap-2 px-4 py-1 text-[10px] font-medium tracking-wide
+        ${liveMode
+          ? "bg-amber-500/10 text-amber-400 border-b border-amber-500/20"
+          : "bg-white/[0.02] text-slate-600 border-b border-white/[0.04]"
+        }
+      `}>
+        {liveMode ? (
+          <>
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-400" />
+            </span>
+            LIVE MODE — Querying latest data from system tables
+          </>
+        ) : cached ? (
+          <>
+            Showing cached data{cachedAt ? ` · Last refreshed: ${formatTimeAgo(cachedAt)}` : ""}
+            {" · "}
+            <button onClick={handleLiveModeToggle} className="underline underline-offset-2 hover:text-slate-400 transition-colors">
+              Switch to live
+            </button>
+          </>
+        ) : (
+          <>Data loaded from system tables</>
+        )}
+      </div>
+    )}
+    </>
   );
+}
+
+function formatTimeAgo(isoDate: string): string {
+  const diff = Date.now() - new Date(isoDate).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ${mins % 60}m ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
 }
 
 function SelectBox({

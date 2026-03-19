@@ -52,7 +52,7 @@ def _get_client() -> WorkspaceClient:
 # TTL cache — eliminates redundant DBSQL queries for concurrent users
 # ---------------------------------------------------------------------------
 _cache: dict[str, tuple[float, object]] = {}
-CACHE_TTL_SECONDS = 300  # 5 minutes
+CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "28800"))  # default 8 hours
 
 
 def _cache_get(key: str):
@@ -296,11 +296,12 @@ def _infer_lineage(client: WorkspaceClient, catalog: str, schema: str, schema_ta
     return deduped
 
 
-def get_table_lineage(catalog: str, schema: str) -> LineageResponse:
+def get_table_lineage(catalog: str, schema: str, skip_cache: bool = False) -> LineageResponse:
     cache_key = f"lineage:{catalog}.{schema}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
+    if not skip_cache:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
 
     client = _get_client()
     full_schema = f"{catalog}.{schema}"
@@ -422,12 +423,13 @@ def get_table_lineage(catalog: str, schema: str) -> LineageResponse:
     return result
 
 
-def get_columns(catalog: str, schema: str, table: str) -> list[dict]:
+def get_columns(catalog: str, schema: str, table: str, skip_cache: bool = False) -> list[dict]:
     """Lazy column loader — returns columns for a single table (cache-first)."""
     cache_key = f"columns:{catalog}.{schema}.{table}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
+    if not skip_cache:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
     client = _get_client()
     sql = f"""
     SELECT column_name, data_type, is_nullable, ordinal_position

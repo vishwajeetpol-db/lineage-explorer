@@ -5,10 +5,12 @@ import ReactFlow, {
   Controls,
   MiniMap,
   useReactFlow,
+  applyNodeChanges,
   type Node,
   type Edge,
   type NodeTypes,
   type EdgeTypes,
+  type NodeChange,
 } from "reactflow";
 import "reactflow/dist/style.css";
 import { AnimatePresence, motion } from "framer-motion";
@@ -56,6 +58,14 @@ function LineageCanvas() {
   } | null>(null);
   const reactFlowInstance = useReactFlow();
   const tooltipTimer = useRef<ReturnType<typeof setTimeout>>();
+
+  // Allow dragging nodes by applying position changes
+  const onNodesChange = useCallback(
+    (changes: NodeChange[]) => {
+      setFlowNodes((nds) => applyNodeChanges(changes, nds));
+    },
+    [setFlowNodes]
+  );
 
   // Compute connected nodes for highlighting
   const connectedNodes = useMemo(() => {
@@ -356,8 +366,10 @@ function LineageCanvas() {
         edges={flowEdges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
+        onNodesChange={onNodesChange}
         onPaneClick={handlePaneClick}
         onNodeClick={handleNodeClick}
+        nodesDraggable
         fitView
         fitViewOptions={{ padding: 0.15 }}
         minZoom={0.1}

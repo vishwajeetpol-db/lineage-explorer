@@ -1,7 +1,16 @@
 const BASE = "/api";
 
+let _liveMode = false;
+export function setLiveMode(live: boolean) { _liveMode = live; }
+export function getLiveMode() { return _liveMode; }
+
+function appendLive(url: string): string {
+  if (!_liveMode) return url;
+  return url + (url.includes("?") ? "&" : "?") + "live=true";
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url);
+  const res = await fetch(appendLive(url));
   if (!res.ok) {
     const err = await res.text();
     throw new Error(`API error ${res.status}: ${err}`);
@@ -38,6 +47,8 @@ export interface ColumnLineageEdge {
 export interface LineageResponse {
   nodes: TableNode[];
   edges: LineageEdge[];
+  cached?: boolean;
+  cached_at?: string | null;
 }
 
 export interface ColumnLineageResponse {

@@ -6,6 +6,7 @@ interface LineageState {
   catalog: string;
   schema: string;
   columnLineageEnabled: boolean;
+  liveMode: boolean;
 
   // Data
   catalogs: string[];
@@ -13,6 +14,10 @@ interface LineageState {
   nodes: TableNode[];
   edges: LineageEdge[];
   columnEdges: ColumnLineageEdge[];
+
+  // Cache metadata
+  cached: boolean;
+  cachedAt: string | null;
 
   // UI state
   loading: boolean;
@@ -28,9 +33,10 @@ interface LineageState {
   setCatalog: (catalog: string) => void;
   setSchema: (schema: string) => void;
   setColumnLineageEnabled: (enabled: boolean) => void;
+  setLiveMode: (live: boolean) => void;
   setCatalogs: (catalogs: string[]) => void;
   setSchemas: (schemas: string[]) => void;
-  setLineageData: (nodes: TableNode[], edges: LineageEdge[]) => void;
+  setLineageData: (nodes: TableNode[], edges: LineageEdge[], cached?: boolean, cachedAt?: string | null) => void;
   setColumnEdges: (edges: ColumnLineageEdge[]) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
@@ -47,11 +53,14 @@ export const useLineageStore = create<LineageState>((set) => ({
   catalog: "",
   schema: "",
   columnLineageEnabled: false,
+  liveMode: false,
   catalogs: [],
   schemas: [],
   nodes: [],
   edges: [],
   columnEdges: [],
+  cached: false,
+  cachedAt: null,
   loading: false,
   error: null,
   expandedNodes: new Set(),
@@ -61,12 +70,13 @@ export const useLineageStore = create<LineageState>((set) => ({
   searchQuery: "",
   searchOpen: false,
 
-  setCatalog: (catalog) => set({ catalog, schema: "", schemas: [], nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null }),
-  setSchema: (schema) => set({ schema, nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null }),
+  setCatalog: (catalog) => set({ catalog, schema: "", schemas: [], nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null, cached: false, cachedAt: null }),
+  setSchema: (schema) => set({ schema, nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null, cached: false, cachedAt: null }),
   setColumnLineageEnabled: (enabled) => set({ columnLineageEnabled: enabled, columnEdges: [], selectedColumn: null, expandedNodes: new Set() }),
+  setLiveMode: (live) => set({ liveMode: live }),
   setCatalogs: (catalogs) => set({ catalogs }),
   setSchemas: (schemas) => set({ schemas }),
-  setLineageData: (nodes, edges) => set({ nodes, edges, loading: false, error: null }),
+  setLineageData: (nodes, edges, cached, cachedAt) => set({ nodes, edges, loading: false, error: null, cached: cached ?? false, cachedAt: cachedAt ?? null }),
   setColumnEdges: (columnEdges) => set({ columnEdges }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error, loading: false }),
