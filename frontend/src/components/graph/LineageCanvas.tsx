@@ -72,7 +72,20 @@ function LineageCanvas() {
     [setFlowNodes]
   );
 
-  // Compute connected nodes for highlighting
+  // Pre-compute adjacency maps for O(1) lookups (avoids O(n²) on every hover/select)
+  const adjacency = useMemo(() => {
+    const upstream = new Map<string, string[]>();  // target -> sources
+    const downstream = new Map<string, string[]>(); // source -> targets
+    for (const e of rawEdges) {
+      if (!upstream.has(e.target)) upstream.set(e.target, []);
+      upstream.get(e.target)!.push(e.source);
+      if (!downstream.has(e.source)) downstream.set(e.source, []);
+      downstream.get(e.source)!.push(e.target);
+    }
+    return { upstream, downstream };
+  }, [rawEdges]);
+
+  // Compute connected nodes for highlighting using adjacency maps
   const connectedNodes = useMemo(() => {
     if (!selectedNode && !hoveredNode) return new Set<string>();
     const target = selectedNode || hoveredNode;
@@ -80,26 +93,26 @@ function LineageCanvas() {
     if (target) {
       connected.add(target);
       const findUpstream = (nodeId: string) => {
-        rawEdges.forEach((e) => {
-          if (e.target === nodeId && !connected.has(e.source)) {
-            connected.add(e.source);
-            findUpstream(e.source);
+        for (const src of adjacency.upstream.get(nodeId) || []) {
+          if (!connected.has(src)) {
+            connected.add(src);
+            findUpstream(src);
           }
-        });
+        }
       };
       const findDownstream = (nodeId: string) => {
-        rawEdges.forEach((e) => {
-          if (e.source === nodeId && !connected.has(e.target)) {
-            connected.add(e.target);
-            findDownstream(e.target);
+        for (const tgt of adjacency.downstream.get(nodeId) || []) {
+          if (!connected.has(tgt)) {
+            connected.add(tgt);
+            findDownstream(tgt);
           }
-        });
+        }
       };
       findUpstream(target);
       findDownstream(target);
     }
     return connected;
-  }, [selectedNode, hoveredNode, rawEdges]);
+  }, [selectedNode, hoveredNode, adjacency]);
 
   const connectedEdges = useMemo(() => {
     if (!selectedNode && !hoveredNode) return new Set<string>();

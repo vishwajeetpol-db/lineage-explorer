@@ -524,7 +524,7 @@ def get_columns(catalog: str, schema: str, table: str, skip_cache: bool = False)
         _cache_release(cache_key)
 
 
-def get_column_lineage(catalog: str, schema: str, table: str, column: str) -> ColumnLineageResponse:
+def get_column_lineage(catalog: str, schema: str, table: str, column: str, skip_cache: bool = False) -> ColumnLineageResponse:
     client = _get_client()
 
     full_table = f"{catalog}.{schema}.{table}"

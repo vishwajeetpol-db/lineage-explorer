@@ -42,9 +42,14 @@ function Toolbar({ onGenerate }: Props) {
   }, [setCatalogs]);
 
   useEffect(() => {
-    if (catalog) {
-      api.getSchemas(catalog).then((r) => setSchemas(r.schemas)).catch(console.error);
-    }
+    if (!catalog) return;
+    let cancelled = false;
+    api.getSchemas(catalog).then((r) => {
+      if (!cancelled) setSchemas(r.schemas);
+    }).catch((e) => {
+      if (!cancelled) console.error(e);
+    });
+    return () => { cancelled = true; };
   }, [catalog, setSchemas]);
 
   const handleGenerate = useCallback(() => {
