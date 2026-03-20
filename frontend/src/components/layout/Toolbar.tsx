@@ -1,6 +1,6 @@
-import { memo, useCallback, useEffect } from "react";
-import { motion } from "framer-motion";
-import { GitBranch, Search, ChevronDown, Columns3, Zap } from "lucide-react";
+import { memo, useCallback, useEffect, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { GitBranch, Search, ChevronDown, Columns3, Zap, Info } from "lucide-react";
 import { useLineageStore } from "../../store/lineageStore";
 import { api, setLiveMode } from "../../api/client";
 
@@ -17,12 +17,25 @@ function Toolbar({ onGenerate }: Props) {
   } = useLineageStore();
 
   const nodes = useLineageStore((s) => s.nodes);
+  const [toast, setToast] = useState<string | null>(null);
 
   const handleLiveModeToggle = useCallback(() => {
     const next = !liveMode;
     setStoreLiveMode(next);
     setLiveMode(next);
+    if (next) {
+      setToast("Live mode enabled — next refresh will query system tables directly. This may take a few seconds.");
+    } else {
+      setToast("Live mode disabled — data will be served from cache for faster loading.");
+    }
   }, [liveMode, setStoreLiveMode]);
+
+  // Auto-dismiss toast
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   useEffect(() => {
     api.getCatalogs().then((r) => setCatalogs(r.catalogs)).catch(console.error);
@@ -190,14 +203,15 @@ function Toolbar({ onGenerate }: Props) {
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
               <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-400" />
             </span>
-            LIVE MODE — Querying latest data from system tables
+            LIVE MODE — Fetching fresh data from Unity Catalog system tables (may take a few seconds)
           </>
         ) : cached ? (
           <>
-            Showing cached data{cachedAt ? ` · Last refreshed: ${formatTimeAgo(cachedAt)}` : ""}
+            <Info size={10} className="text-slate-600 flex-shrink-0" />
+            Showing cached data for instant loading{cachedAt ? ` · Refreshed ${formatTimeAgo(cachedAt)}` : ""}
             {" · "}
             <button onClick={handleLiveModeToggle} className="underline underline-offset-2 hover:text-slate-400 transition-colors">
-              Switch to live
+              Enable live mode for latest data
             </button>
           </>
         ) : (
@@ -205,6 +219,28 @@ function Toolbar({ onGenerate }: Props) {
         )}
       </div>
     )}
+
+    {/* Toast notification for live mode toggle */}
+    <AnimatePresence>
+      {toast && (
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -20 }}
+          transition={{ duration: 0.3 }}
+          className="fixed top-20 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-2.5 px-4 py-2.5 rounded-xl bg-[#1A1A2E]/95 backdrop-blur-md border border-white/[0.08] shadow-[0_8px_32px_rgba(0,0,0,0.5)]"
+        >
+          <Zap size={13} className={liveMode ? "text-amber-400" : "text-slate-500"} />
+          <span className="text-[12px] text-slate-300 font-medium max-w-[360px]">{toast}</span>
+          <button
+            onClick={() => setToast(null)}
+            className="text-slate-600 hover:text-slate-400 text-[14px] ml-1 transition-colors"
+          >
+            &times;
+          </button>
+        </motion.div>
+      )}
+    </AnimatePresence>
     </>
   );
 }

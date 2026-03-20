@@ -63,20 +63,12 @@ export async function layoutGraph(
 
   const positionedNodes = nodes.map((node) => {
     const elkNode = graph.children?.find((n) => n.id === node.id);
-    const isExpanded = expandedNodes.has(node.id);
-    const columnCount = node.data?.columns?.length || 0;
 
     return {
       ...node,
       position: {
         x: elkNode?.x || 0,
         y: elkNode?.y || 0,
-      },
-      style: {
-        width: isExpanded ? EXPANDED_WIDTH : COMPACT_WIDTH,
-        height: isExpanded
-          ? EXPANDED_BASE_HEIGHT + columnCount * COLUMN_ROW_HEIGHT + 12
-          : COMPACT_HEIGHT,
       },
     };
   });

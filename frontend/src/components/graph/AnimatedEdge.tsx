@@ -10,7 +10,9 @@ function AnimatedEdge({
   sourcePosition,
   targetPosition,
   data,
-}: EdgeProps<{ isHighlighted: boolean; isDimmed: boolean; isColumnEdge: boolean }>) {
+}: EdgeProps<{ isHighlighted: boolean; isDimmed: boolean; isColumnEdge: boolean; isVisible?: boolean }>) {
+  if (data?.isVisible === false) return null;
+
   const [edgePath] = getBezierPath({
     sourceX,
     sourceY,

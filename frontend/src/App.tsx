@@ -6,20 +6,26 @@ import { useLineageStore } from "./store/lineageStore";
 import { api, setLiveMode } from "./api/client";
 
 export default function App() {
-  const { catalog, schema, liveMode, setLineageData, setLoading, setError } = useLineageStore();
+  const { catalog, schema, liveMode, setLineageData, setError } = useLineageStore();
 
   const handleGenerate = useCallback(async () => {
     if (!catalog || !schema) return;
     setLiveMode(liveMode);
-    setLoading(true);
-    setError(null);
+    // Clear error and set loading in one tick — setError(null) would override loading
+    useLineageStore.setState({ loading: true, error: null });
+    const minDisplay = liveMode ? 2500 : 1200; // ensure loading animation is visible
+    const start = Date.now();
     try {
       const data = await api.getLineage(catalog, schema);
+      const elapsed = Date.now() - start;
+      if (elapsed < minDisplay) {
+        await new Promise((r) => setTimeout(r, minDisplay - elapsed));
+      }
       setLineageData(data.nodes, data.edges, data.cached, data.cached_at);
     } catch (err: any) {
       setError(err.message || "Failed to load lineage data");
     }
-  }, [catalog, schema, liveMode, setLineageData, setLoading, setError]);
+  }, [catalog, schema, liveMode, setLineageData, setError]);
 
   return (
     <ReactFlowProvider>

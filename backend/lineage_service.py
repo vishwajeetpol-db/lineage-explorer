@@ -23,6 +23,7 @@ All optional queries are wrapped in try/except — the app degrades gracefully.
 import os
 import time
 import logging
+import random
 import threading
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementState
@@ -92,11 +93,12 @@ def _cache_acquire(key: str) -> bool:
 
 def _cache_wait(key: str, timeout: float = 120) -> object | None:
     """Wait for the leader thread to finish fetching, then return the cached value."""
+    jitter = random.uniform(0, 10)  # spread wakeups over 10s window
     with _cache_lock:
         event = _inflight.get(key)
     if event is None:
         return _cache_get(key)
-    event.wait(timeout=timeout)
+    event.wait(timeout=timeout + jitter)
     return _cache_get(key)
 
 
@@ -348,8 +350,13 @@ def get_table_lineage(catalog: str, schema: str, skip_cache: bool = False) -> Li
             result = _cache_wait(cache_key)
             if result is not None:
                 return result
-            # Leader failed — fall through and become the new leader
-            _cache_acquire(cache_key)
+            # Leader failed — backoff before retrying to avoid stampede
+            time.sleep(random.uniform(0.05, 0.5))
+            if not _cache_acquire(cache_key):
+                result = _cache_wait(cache_key)
+                if result is not None:
+                    return result
+                # Still no luck — proceed solo (safe: just a redundant query)
 
     try:
         result = _fetch_table_lineage(catalog, schema, cache_key)
@@ -493,7 +500,13 @@ def get_columns(catalog: str, schema: str, table: str, skip_cache: bool = False)
             result = _cache_wait(cache_key)
             if result is not None:
                 return result
-            _cache_acquire(cache_key)
+            # Leader failed — backoff before retrying to avoid stampede
+            time.sleep(random.uniform(0.05, 0.5))
+            if not _cache_acquire(cache_key):
+                result = _cache_wait(cache_key)
+                if result is not None:
+                    return result
+                # Still no luck — proceed solo
 
     try:
         client = _get_client()

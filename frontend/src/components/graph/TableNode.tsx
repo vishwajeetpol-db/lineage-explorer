@@ -13,13 +13,14 @@ const typeConfig: Record<string, { color: string; bg: string; border: string; ic
   MATERIALIZED_VIEW: { color: "text-amber-400", bg: "bg-amber-500/10", border: "border-amber-500/25", icon: Layers, label: "MAT VIEW", dot: "bg-amber-400" },
 };
 
-function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded: boolean; isSelected: boolean; isHighlighted: boolean; isDimmed: boolean }>) {
+function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded: boolean; isSelected: boolean; isHighlighted: boolean; isDimmed: boolean; isRevealed?: boolean }>) {
   const { columnLineageEnabled, selectedColumn, toggleNodeExpanded, setSelectedColumn, setHoveredNode } = useLineageStore();
   const config = typeConfig[data.table_type] || typeConfig.MANAGED;
   const Icon = config.icon;
   const isExpanded = data.isExpanded;
   const isSelected = data.isSelected;
   const isDimmed = data.isDimmed;
+  const isRevealed = data.isRevealed ?? true;
 
   const handleNodeClick = useCallback(() => {
     if (columnLineageEnabled) {
@@ -43,13 +44,12 @@ function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded
 
   return (
     <motion.div
-      layout
-      initial={false}
+      initial={{ opacity: 0, scale: 0.95 }}
       animate={{
-        opacity: isDimmed ? 0.2 : 1,
-        scale: isSelected ? 1.02 : 1,
+        opacity: isRevealed ? (isDimmed ? 0.2 : 1) : 0,
+        scale: isRevealed ? 1 : 0.95,
       }}
-      transition={{ duration: 0.25, ease: "easeOut" }}
+      transition={{ duration: 0.3, ease: "easeOut" }}
       className={`
         relative rounded-2xl border transition-all duration-300
         ${isSelected
