@@ -79,6 +79,15 @@ def _cache_get(key: str):
         return val
 
 
+def _cache_get_ts(key: str) -> float | None:
+    """Return the timestamp when a cache entry was set, or None."""
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry is None:
+            return None
+        return entry[0]
+
+
 def _cache_set(key: str, val: object):
     with _cache_lock:
         _cache[key] = (time.time(), val)
@@ -339,31 +348,47 @@ def _infer_lineage(client: WorkspaceClient, catalog: str, schema: str, schema_ta
     return deduped
 
 
+def _add_cache_metadata(result: LineageResponse, cache_key: str, fetch_ms: int | None = None, from_cache: bool = False) -> LineageResponse:
+    """Attach cache metadata to the response."""
+    from datetime import datetime, timezone
+    cache_ts = _cache_get_ts(cache_key)
+    if cache_ts is not None:
+        result.cached = from_cache
+        result.cached_at = datetime.fromtimestamp(cache_ts, tz=timezone.utc).isoformat()
+        expires = cache_ts + CACHE_TTL_SECONDS
+        result.cache_expires_at = datetime.fromtimestamp(expires, tz=timezone.utc).isoformat()
+    if fetch_ms is not None:
+        result.fetch_duration_ms = fetch_ms
+    return result
+
+
 def get_table_lineage(catalog: str, schema: str, skip_cache: bool = False) -> LineageResponse:
     cache_key = f"lineage:{catalog}.{schema}"
 
     if not skip_cache:
         cached = _cache_get(cache_key)
         if cached is not None:
-            return cached
+            return _add_cache_metadata(cached, cache_key, fetch_ms=0, from_cache=True)
 
         # Single-flight: if another thread is already fetching this key, wait for it
         if not _cache_acquire(cache_key):
             logger.info(f"Request coalescing: waiting for in-flight fetch of {cache_key}")
             result = _cache_wait(cache_key)
             if result is not None:
-                return result
+                return _add_cache_metadata(result, cache_key, fetch_ms=0, from_cache=True)
             # Leader failed — backoff before retrying to avoid stampede
             time.sleep(random.uniform(0.05, 0.5))
             if not _cache_acquire(cache_key):
                 result = _cache_wait(cache_key)
                 if result is not None:
-                    return result
+                    return _add_cache_metadata(result, cache_key, fetch_ms=0, from_cache=True)
                 # Still no luck — proceed solo (safe: just a redundant query)
 
     try:
+        fetch_start = time.time()
         result = _fetch_table_lineage(catalog, schema, cache_key)
-        return result
+        fetch_ms = int((time.time() - fetch_start) * 1000)
+        return _add_cache_metadata(result, cache_key, fetch_ms=fetch_ms, from_cache=False)
     finally:
         _cache_release(cache_key)
 

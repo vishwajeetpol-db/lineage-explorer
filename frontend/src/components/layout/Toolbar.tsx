@@ -11,7 +11,7 @@ interface Props {
 function Toolbar({ onGenerate }: Props) {
   const {
     catalog, schema, columnLineageEnabled, liveMode,
-    catalogs, schemas, loading, cached, cachedAt,
+    catalogs, schemas, loading, cached, cachedAt, cacheExpiresAt, fetchDurationMs,
     setCatalog, setSchema, setColumnLineageEnabled, setLiveMode: setStoreLiveMode,
     setCatalogs, setSchemas, setSearchOpen,
   } = useLineageStore();
@@ -202,25 +202,38 @@ function Toolbar({ onGenerate }: Props) {
           : "bg-white/[0.02] text-slate-600 border-b border-white/[0.04]"
         }
       `}>
+        {/* Fetch duration badge */}
+        {fetchDurationMs != null && (
+          <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono ${
+            fetchDurationMs === 0
+              ? "bg-emerald-500/15 text-emerald-400"
+              : fetchDurationMs < 3000
+                ? "bg-blue-500/15 text-blue-400"
+                : "bg-amber-500/15 text-amber-400"
+          }`}>
+            {fetchDurationMs === 0 ? "cache <1ms" : `${(fetchDurationMs / 1000).toFixed(1)}s`}
+          </span>
+        )}
         {liveMode ? (
           <>
             <span className="relative flex h-1.5 w-1.5">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
               <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-400" />
             </span>
-            LIVE MODE — Fetching fresh data from Unity Catalog system tables (may take a few seconds)
+            LIVE MODE — Fetching fresh data from Unity Catalog system tables
           </>
         ) : cached ? (
           <>
             <Info size={10} className="text-slate-600 flex-shrink-0" />
-            Showing cached data for instant loading{cachedAt ? ` · Refreshed ${formatTimeAgo(cachedAt)}` : ""}
+            Cached{cachedAt ? ` · Refreshed ${formatTimeAgo(cachedAt)}` : ""}
+            {cacheExpiresAt ? ` · Expires ${formatTimeUntil(cacheExpiresAt)}` : ""}
             {" · "}
             <button onClick={handleLiveModeToggle} className="underline underline-offset-2 hover:text-slate-400 transition-colors">
               Enable live mode for latest data
             </button>
           </>
         ) : (
-          <>Data loaded from system tables</>
+          <>Loaded fresh from system tables{cacheExpiresAt ? ` · Cache expires ${formatTimeUntil(cacheExpiresAt)}` : ""}</>
         )}
       </div>
     )}
@@ -258,6 +271,16 @@ function formatTimeAgo(isoDate: string): string {
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ${mins % 60}m ago`;
   return `${Math.floor(hrs / 24)}d ago`;
+}
+
+function formatTimeUntil(isoDate: string): string {
+  const diff = new Date(isoDate).getTime() - Date.now();
+  if (diff <= 0) return "expired";
+  const mins = Math.floor(diff / 60000);
+  if (mins < 60) return `in ${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `in ${hrs}h ${mins % 60}m`;
+  return `in ${Math.floor(hrs / 24)}d`;
 }
 
 function SelectBox({

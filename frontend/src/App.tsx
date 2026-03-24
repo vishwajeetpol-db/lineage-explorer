@@ -21,7 +21,7 @@ export default function App() {
       if (elapsed < minDisplay) {
         await new Promise((r) => setTimeout(r, minDisplay - elapsed));
       }
-      setLineageData(data.nodes, data.edges, data.cached, data.cached_at);
+      setLineageData(data.nodes, data.edges, data.cached, data.cached_at, data.cache_expires_at, data.fetch_duration_ms);
     } catch (err: any) {
       setError(err.message || "Failed to load lineage data");
     }
