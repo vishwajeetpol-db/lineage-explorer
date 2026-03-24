@@ -14,3 +14,6 @@ worspace_details_access_tokens
 ss_*
 screenshot_*
 databricks.yml
+create_stress_test.py
+generate_stress_test.py
+README.md

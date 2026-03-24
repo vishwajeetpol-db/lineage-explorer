@@ -1,97 +1,330 @@
-# Unity Catalog Lineage Explorer
+# Lineage Explorer
 
-An interactive DAG visualization app that renders table and column-level dependency graphs for any Databricks Unity Catalog schema. Select a catalog and schema, and instantly see how tables, views, and materialized views connect — from raw ingestion through silver transformations to gold analytics layers.
+Interactive data lineage visualization for Databricks Unity Catalog. Explore table dependencies, column-level lineage, and data flow across schemas — all through a polished DAG interface.
+
+![Tech Stack](https://img.shields.io/badge/FastAPI-009688?style=flat&logo=fastapi&logoColor=white) ![React](https://img.shields.io/badge/React-61DAFB?style=flat&logo=react&logoColor=black) ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white) ![Databricks](https://img.shields.io/badge/Databricks-FF3621?style=flat&logo=databricks&logoColor=white)
 
 ---
 
-## Why This Exists
+## Features
 
-Understanding data lineage is critical for data governance, impact analysis, and debugging pipelines. Unity Catalog provides system tables for lineage, but they can take 24+ hours to populate and lack a visual interface. This app:
+- **Table Lineage DAG** — Automatic left-to-right layout via ELK.js with animated edge routing
+- **Column-Level Lineage** — Expand nodes to see columns, click a column to trace its flow upstream/downstream
+- **Live Mode** — Toggle between cached data (instant) and live system table queries
+- **Smart Lineage Inference** — When `system.access.table_lineage` is unavailable, lineage is inferred from view definitions, query history, naming conventions (`raw_*` -> `cleaned_*`), and column overlap heuristics
+- **Request Coalescing** — Single-flight pattern prevents thundering herd: 4,000 simultaneous requests generate only 1 DBSQL query
+- **Staggered Reveal Animation** — Nodes cascade left-to-right after layout, edges appear when both endpoints are visible
+- **Search** — Cmd+K to search tables/views
+- **Interactive** — Drag nodes, zoom/pan, hover tooltips, node highlighting with upstream/downstream paths
+- **Reset Layout** — Re-run ELK and replay reveal animation after dragging nodes
 
-- **Visualizes lineage instantly** — even when system tables are empty, using multi-strategy inference (view definition parsing, query history, naming conventions, column overlap heuristics)
-- **Supports column-level lineage** — toggle column lineage mode, expand a table, click a column, and see exactly which upstream/downstream tables share that column
-- **Runs as a Databricks App** — deployed via Databricks Asset Bundles (DABs), with built-in OAuth SSO authentication, no separate infrastructure needed
-- **Handles large schemas** — tested with 150+ tables across 6 business domains with cross-dependencies
+---
+
+## Quick Start: Deploy to Any Workspace (Zero Code Edits)
+
+### Prerequisites
+
+| Requirement | How to Check |
+|-------------|-------------|
+| Databricks CLI v0.239+ | `databricks --version` |
+| CLI authenticated to target workspace | `databricks auth login --profile <name>` |
+| SQL Warehouse (serverless or pro) | Note the warehouse ID from UI or `databricks warehouses list` |
+| Unity Catalog enabled | At least one catalog with data to explore |
+| Node.js 18+ (only if rebuilding frontend) | `node --version` — pre-built `dist/` is committed, so this is optional |
+
+### Step 1: Clone
+
+```bash
+git clone <repo-url>
+cd lineage-explorer
+```
+
+### Step 2: Deploy via DABs (One Command)
+
+```bash
+databricks bundle deploy -t dev \
+  --profile <your-workspace-profile> \
+  --var warehouse_id=<your-warehouse-id>
+```
+
+Then start the app:
+```bash
+databricks bundle run lineage-explorer -t dev --profile <your-workspace-profile>
+```
+
+No files to edit. The `--profile` flag selects the workspace from `~/.databrickscfg`, and `--var` provides the warehouse ID.
+
+### Step 3: Grant Permissions to the App's SPN
+
+After deployment, Databricks auto-creates a service principal for the app. Grant it access:
+
+```bash
+# Get the app's auto-generated SPN client ID
+APP_SPN=$(databricks apps get lineage-explorer-dev --profile <your-profile> -o json \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['service_principal_client_id'])")
+echo "App SPN: $APP_SPN"
+```
+
+**Required grants** (minimum for the app to function):
+
+```sql
+-- Replace <catalog>, <schema>, and <app-spn> with actual values
+GRANT USE CATALOG ON CATALOG <catalog> TO `<app-spn>`;
+GRANT BROWSE ON CATALOG <catalog> TO `<app-spn>`;
+GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO `<app-spn>`;
+```
+
+**Grant warehouse access** (via API — replace values):
+
+```bash
+curl -X PUT "https://<workspace-host>/api/2.0/permissions/sql/warehouses/<warehouse-id>" \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"access_control_list": [{"service_principal_name": "<app-spn>", "permission_level": "CAN_USE"}]}'
+```
+
+Or via UI: **SQL Warehouses > Your Warehouse > Permissions > Add the app SPN with "Can Use"**
+
+### Step 4: Verify
+
+```bash
+# Get app URL
+databricks apps get lineage-explorer-dev --profile <your-profile> -o json \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['url'])"
+```
+
+Open the URL, select a catalog and schema, click "Generate Lineage".
+
+---
+
+## Deploying via CI/CD (Service Principal)
+
+When deploying with an external SPN (not a human user), the **deploying SPN** also needs permissions:
+
+```sql
+-- Deploying SPN needs these to validate the app
+GRANT USE CATALOG ON CATALOG <catalog> TO `<deploying-spn>`;
+GRANT BROWSE ON CATALOG <catalog> TO `<deploying-spn>`;
+GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO `<deploying-spn>`;
+```
+
+Plus warehouse `CAN_USE` (same API call as above, with the deploying SPN's client_id).
+
+Configure the SPN in `~/.databrickscfg`:
+
+```ini
+[my-spn-profile]
+host          = https://<workspace>.cloud.databricks.com
+client_id     = <spn-client-id>
+client_secret = <spn-secret>
+auth_type     = oauth-m2m
+```
+
+Then deploy:
+```bash
+databricks bundle deploy -t prod --profile my-spn-profile --var warehouse_id=<wh-id>
+databricks bundle run lineage-explorer -t prod --profile my-spn-profile
+```
+
+---
+
+## Optional: Enhanced Lineage Privileges
+
+Without optional privileges, the app infers lineage from naming conventions, column overlap, and query history (~60-85% coverage). Adding system table access improves coverage:
+
+```sql
+-- Enables view definition parsing (~85-90% coverage)
+GRANT SELECT ON SCHEMA <catalog>.<schema> TO `<app-spn>`;
+
+-- Enables real Unity Catalog lineage (~100% coverage, requires metastore admin)
+GRANT USE CATALOG ON CATALOG system TO `<app-spn>`;
+GRANT USE SCHEMA ON SCHEMA system.access TO `<app-spn>`;
+GRANT SELECT ON SCHEMA system.access TO `<app-spn>`;
+GRANT USE SCHEMA ON SCHEMA system.query TO `<app-spn>`;
+GRANT SELECT ON SCHEMA system.query TO `<app-spn>`;
+```
+
+| Privileges Granted | Lineage Strategies | Approx Coverage |
+|---|---|---|
+| Minimum only (no SELECT) | Naming conventions + column overlap | ~60-70% |
+| + SELECT on schema | Above + view definition parsing | ~85-90% |
+| + SELECT on system tables | Real Unity Catalog lineage | ~100% |
+
+The app **never crashes** regardless of privilege level — all optional queries are wrapped in try/except with graceful fallback.
+
+---
+
+## Complete Permission Reference
+
+### Two SPNs Need Permissions
+
+| SPN | What It Is | When It Exists |
+|-----|-----------|---------------|
+| **App SPN** | Auto-created by Databricks when the app is deployed | After `bundle deploy` |
+| **Deploying SPN** | External SPN used for CI/CD automation | Only when deploying via SPN (not needed for human user deploys) |
+
+### Required Permissions Matrix
+
+| Permission | App SPN | Deploying SPN | How to Grant |
+|-----------|---------|--------------|-------------|
+| `USE CATALOG` on target catalog | Yes | Yes (if SPN) | `GRANT USE CATALOG ON CATALOG <cat> TO \`<spn>\`` |
+| `BROWSE` on target catalog | Yes | Yes (if SPN) | `GRANT BROWSE ON CATALOG <cat> TO \`<spn>\`` |
+| `USE SCHEMA` on target schema(s) | Yes | Yes (if SPN) | `GRANT USE SCHEMA ON SCHEMA <cat>.<sch> TO \`<spn>\`` |
+| `CAN_USE` on SQL Warehouse | Yes | Yes (if SPN) | Permissions API (PUT) or UI |
+| Workspace membership | Auto (app SPN is auto-added) | Must exist in workspace | Add via SCIM API or UI |
+
+### Optional Permissions (Enhanced Lineage)
+
+| Permission | Purpose |
+|-----------|---------|
+| `SELECT` on target schema | View definition parsing for lineage inference |
+| `USE CATALOG` on `system` | Access to system tables |
+| `SELECT` on `system.access` | Real table/column lineage from Unity Catalog |
+| `SELECT` on `system.query` | Query history parsing for CTAS lineage |
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Databricks App                        │
-│                                                         │
-│  ┌──────────────┐     ┌──────────────────────────────┐  │
-│  │   FastAPI     │     │       React Frontend         │  │
-│  │   Backend     │     │                              │  │
-│  │              │────▶│  React Flow (DAG canvas)     │  │
-│  │  /api/       │     │  ELK.js (layered layout)     │  │
-│  │  catalogs    │     │  Framer Motion (animations)  │  │
-│  │  schemas     │     │  Zustand (state management)  │  │
-│  │  lineage     │     │  Tailwind CSS (dark theme)   │  │
-│  │  column-     │     │                              │  │
-│  │  lineage     │     │  Client-side column lineage  │  │
-│  └──────┬───────┘     └──────────────────────────────┘  │
-│         │                                               │
-│         │  Databricks SDK (unified auth)                │
-│         │  Supports: SP OAuth M2M, PAT, Azure MSI,     │
-│         │  OAuth U2M, and Databricks App auto-auth      │
-│         ▼                                               │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │  Unity Catalog                                    │   │
-│  │  • information_schema.tables / columns / views    │   │
-│  │  • system.access.table_lineage / column_lineage   │   │
-│  │  • system.query.history                           │   │
-│  └──────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────┘
++-------------------------------------------------------------+
+|                    Databricks App                            |
+|                                                             |
+|  +--------------+        +------------------------------+   |
+|  |   FastAPI     |        |       React Frontend         |   |
+|  |   Backend     |        |                              |   |
+|  |              |------->|  React Flow (DAG canvas)     |   |
+|  |  /api/       |        |  ELK.js (layered layout)     |   |
+|  |  /health     |        |  Framer Motion (animations)  |   |
+|  |              |        |  Zustand (state management)  |   |
+|  |  Middleware:  |        |  Tailwind CSS (dark theme)   |   |
+|  |  - Rate limit |        |  ErrorBoundary (crash guard) |   |
+|  |  - Validation |        |                              |   |
+|  |  - Sanitize   |        |  Client-side column lineage  |   |
+|  +------+-------+        +------------------------------+   |
+|         |                                                    |
+|         |  Databricks SDK (unified auth)                     |
+|         v                                                    |
+|  +------------------------------------------------------+    |
+|  |  Unity Catalog                                        |    |
+|  |  - information_schema.tables / columns / views        |    |
+|  |  - system.access.table_lineage / column_lineage       |    |
+|  |  - system.query.history                               |    |
+|  +------------------------------------------------------+    |
++-------------------------------------------------------------+
 ```
 
 ### Authentication Model
-
-This app uses the **Databricks SDK unified authentication**, which auto-detects credentials from environment variables. It supports multiple auth methods — no code changes needed:
 
 | Method | Env Vars Required | Use Case |
 |--------|------------------|----------|
 | **Databricks App (auto)** | None — injected automatically | Production: running as a Databricks App |
 | **Service Principal (OAuth M2M)** | `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET` | CI/CD, automation, standalone deployment |
-| **Personal Access Token** | `DATABRICKS_HOST`, `DATABRICKS_TOKEN` | Local development only (not recommended for prod) |
-| **Azure Managed Identity** | `DATABRICKS_HOST`, `ARM_CLIENT_ID` | Azure-hosted environments |
-
-**When deployed as a Databricks App**, the app's built-in service principal is used automatically — no credentials need to be configured. The SDK detects the runtime environment and authenticates via the app's SPN.
-
-### Lineage Inference Strategy
-
-When `system.access.table_lineage` is empty (common in new workspaces), the backend infers lineage using four strategies in order:
-
-1. **View definition parsing** — Extracts `FROM`/`JOIN` references from `information_schema.views`
-2. **Query history analysis** — Parses `CREATE TABLE AS SELECT` and `INSERT INTO ... SELECT` from `system.query.history`
-3. **Naming convention matching** — Links `raw_*` tables to their `cleaned_*` counterparts
-4. **Column overlap heuristic** — If a gold table shares 2+ columns (or >30% overlap) with a silver table, infers a dependency
-
-### Column Lineage (Client-Side)
-
-Column lineage is computed entirely in the browser for instant response (~<10ms). When you click a column, the frontend:
-1. Finds all upstream/downstream tables from existing table-level edges
-2. Checks if those tables have a column with the same name
-3. Draws column-level edges between matching columns
+| **Personal Access Token** | `DATABRICKS_HOST`, `DATABRICKS_TOKEN` | Local development only |
 
 ---
 
-## Tech Stack
+## Configuration (Environment Variables)
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| **Graph Rendering** | [React Flow](https://reactflow.dev/) | Node-based DAG canvas with pan, zoom, minimap |
-| **Graph Layout** | [ELK.js](https://github.com/kieler/elkjs) | Layered DAG layout (Eclipse Layout Kernel) — superior to Dagre for complex graphs |
-| **Animations** | [Framer Motion](https://www.framer.com/motion/) | Smooth expand/collapse, highlight/dim, tooltip transitions |
-| **State Management** | [Zustand](https://github.com/pmndrs/zustand) | Lightweight React state store |
-| **Styling** | [Tailwind CSS](https://tailwindcss.com/) | Utility-first dark theme with custom design tokens |
-| **Icons** | [Lucide React](https://lucide.dev/) | Consistent icon set |
-| **UI Primitives** | [Radix UI](https://www.radix-ui.com/) | Accessible dropdown, toggle, dialog components |
-| **Build Tool** | [Vite](https://vitejs.dev/) | Fast dev server and production bundler |
-| **Backend** | [FastAPI](https://fastapi.tiangolo.com/) + [Uvicorn](https://www.uvicorn.org/) | Async Python API server |
-| **Databricks SDK** | [databricks-sdk](https://docs.databricks.com/dev-tools/sdk-python.html) | Unified auth + SQL Statement Execution API |
-| **Deployment** | [Databricks Apps](https://docs.databricks.com/dev-tools/databricks-apps/index.html) + [DABs](https://docs.databricks.com/dev-tools/bundles/index.html) | Hosted app with OAuth SSO, CI/CD pipeline |
+All configuration is via environment variables. When deploying via DABs, `DATABRICKS_WAREHOUSE_ID` is set automatically from `--var warehouse_id=...`. All others have sensible defaults.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABRICKS_WAREHOUSE_ID` | (auto-detect) | **Required.** SQL warehouse ID for queries |
+| `CACHE_TTL_SECONDS` | `28800` (8h) | How long cached lineage data lives |
+| `SQL_WAIT_TIMEOUT` | `50s` | SQL statement execution timeout (max 50s per API limit) |
+| `QUERY_HISTORY_DAYS` | `7` | How many days of query history to scan for lineage inference |
+| `QUERY_HISTORY_LIMIT` | `200` | Max query history rows to scan per schema |
+| `RATE_LIMIT_MAX_REQUESTS` | `60` | Max API requests per IP per window |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate limit window duration |
+
+To override via DABs, add to the `env` section in `databricks.yml`:
+```yaml
+env:
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: ${var.warehouse_id}
+  - name: CACHE_TTL_SECONDS
+    value: "3600"
+```
+
+---
+
+## Local Development
+
+```bash
+# Terminal 1 — Backend
+pip install -r requirements.txt
+export DATABRICKS_HOST="https://<workspace>.cloud.databricks.com"
+export DATABRICKS_TOKEN="<your-pat>"   # or use SP OAuth env vars
+export DATABRICKS_WAREHOUSE_ID="<warehouse-id>"
+uvicorn backend.main:app --reload --port 8000
+
+# Terminal 2 — Frontend (with hot reload + API proxy to :8000)
+cd frontend && npm install && npm run dev
+```
+
+---
+
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Health check — returns status and version |
+| `GET` | `/api/catalogs` | List available catalogs |
+| `GET` | `/api/schemas?catalog=X` | List schemas in a catalog |
+| `GET` | `/api/lineage?catalog=X&schema=Y&live=false` | Get table lineage graph |
+| `GET` | `/api/columns?catalog=X&schema=Y&table=Z` | Get columns for a table |
+| `GET` | `/api/column-lineage?catalog=X&schema=Y&table=Z&column=W` | Get column-level lineage |
+| `POST` | `/api/cache/invalidate` | Clear cache (localhost only) |
+
+All identifier parameters are validated: alphanumeric + underscores, max 255 chars.
+
+---
+
+## Security
+
+| Protection | Description |
+|-----------|-------------|
+| **Input Validation** | All SQL-interpolated parameters validated against strict regex before use |
+| **Path Traversal** | Static file serving resolves paths and verifies they stay within dist directory |
+| **Rate Limiting** | Configurable req/min/IP on API endpoints, bounded memory (max 10K tracked IPs with LRU eviction) |
+| **Error Sanitization** | Internal error details (SQL text, file paths) never exposed to API clients |
+| **Cache Protection** | Cache invalidation restricted to localhost |
+| **Error Boundary** | Frontend catches React render errors with recovery UI instead of blank screen |
+| **Graceful Shutdown** | Caches cleared on SIGTERM via FastAPI lifespan handler |
+| **Bounded Dependencies** | Python packages pinned to major version ranges (`>=X,<Y`) |
+
+---
+
+## Caching & Concurrency
+
+### Two-Layer Cache
+1. **In-memory TTL** (default 8h) — instant response for repeated requests
+2. **Request coalescing** — if N threads request the same uncached key, only 1 query fires; N-1 wait on a `threading.Event`
+
+### Thundering Herd Protection
+When 4,000 users click "Generate Lineage" simultaneously on a cold cache:
+
+| Without Protection | With Coalescing (implemented) |
+|---|---|
+| 4,000 duplicate DBSQL queries | 1 DBSQL query |
+| Warehouse overwhelmed | 3,999 threads wait on Event |
+| ~10-18s x 4,000 | ~10-18s total (leader) + <1ms (followers) |
+
+If the leader thread fails, waiters use **jittered backoff** (0-10s spread + random 50-500ms delay) to avoid stampeding.
+
+---
+
+## Lineage Inference Engine
+
+When `system.access.table_lineage` is not accessible, lineage is inferred:
+
+1. **View definitions** — Parses `FROM`/`JOIN` references from `information_schema.views`
+2. **Query history** — Scans recent CTAS/INSERT from `system.query.history` (configurable via `QUERY_HISTORY_DAYS`)
+3. **Naming conventions** — Maps `raw_X` -> `cleaned_X` (medallion architecture)
+4. **Column overlap** — Tables sharing >30% columns or 2+ matches are linked
+
+All strategies are additive and deduplicated.
 
 ---
 
@@ -99,383 +332,102 @@ Column lineage is computed entirely in the browser for instant response (~<10ms)
 
 ```
 lineage-explorer/
-├── app.yaml                    # Databricks App config (startup command, env vars)
-├── databricks.yml              # DABs bundle config (dev/prod targets)
-├── requirements.txt            # Python dependencies
-├── generate_stress_test.py     # Script to create 150 test tables across 6 domains
-├── .databricksignore           # Files to exclude from Databricks deployment
-│
+├── databricks.yml              # DABs config — THE canonical deployment config
+├── app.yaml                    # Fallback for manual deployment only
+├── requirements.txt            # Python deps (pinned ranges)
+├── .gitignore
+├── .databricksignore           # Excludes dev files from app deployment
 ├── backend/
 │   ├── __init__.py
-│   ├── main.py                 # FastAPI app — 4 API endpoints + static file serving
-│   ├── models.py               # Pydantic models (TableNode, LineageEdge, etc.)
-│   └── lineage_service.py      # Core service — SQL queries, lineage inference logic
-│
+│   ├── main.py                 # FastAPI app, middleware, validation, health check
+│   ├── lineage_service.py      # DBSQL queries, cache, inference engine
+│   └── models.py               # Pydantic models
 └── frontend/
-    ├── package.json            # Node.js dependencies
-    ├── vite.config.ts          # Vite build config with API proxy
-    ├── tailwind.config.ts      # Custom theme (colors, animations, shadows, fonts)
-    ├── tsconfig.json           # TypeScript config
-    ├── index.html              # Entry HTML with Google Fonts
-    │
-    ├── public/
-    │   └── favicon.svg         # Custom gradient lineage icon
-    │
-    ├── src/
-    │   ├── main.tsx            # React entry point
-    │   ├── App.tsx             # Main app shell (toolbar + canvas)
-    │   ├── api/client.ts       # TypeScript API client
-    │   ├── store/lineageStore.ts   # Zustand state management
-    │   ├── lib/elkLayout.ts    # ELK.js layout configuration
-    │   ├── styles/globals.css  # Tailwind + React Flow style overrides
-    │   │
-    │   └── components/
-    │       ├── graph/
-    │       │   ├── LineageCanvas.tsx  # Main canvas — layout, highlight, column lineage
-    │       │   ├── TableNode.tsx      # Custom node — compact/expanded modes, column rows
-    │       │   └── AnimatedEdge.tsx   # Custom edge — glow, animated dashes, traveling dot
-    │       ├── layout/
-    │       │   └── Toolbar.tsx        # Catalog/schema dropdowns, column toggle, search
-    │       └── ui/
-    │           ├── TableTooltip.tsx   # Hover tooltip with metadata
-    │           ├── SearchDialog.tsx   # Cmd+K search overlay
-    │           └── Skeleton.tsx       # Loading skeleton
-    │
-    └── dist/                   # Production build output (served by FastAPI)
+    ├── package.json
+    ├── vite.config.ts           # Dev server proxy + build config
+    ├── tsconfig.json
+    ├── tailwind.config.ts
+    ├── index.html
+    ├── dist/                    # Built frontend (committed for deployment)
+    └── src/
+        ├── main.tsx             # Entry with ErrorBoundary
+        ├── App.tsx              # Root: toolbar + canvas
+        ├── api/client.ts        # Typed API client
+        ├── store/lineageStore.ts
+        ├── lib/elkLayout.ts     # ELK.js layout
+        └── components/
+            ├── graph/           # LineageCanvas, TableNode, AnimatedEdge
+            ├── layout/          # Toolbar
+            └── ui/              # Skeleton, SearchDialog, TableTooltip, ErrorBoundary
 ```
 
 ---
 
-## Prerequisites
+## Cost Comparison (Deployment Options)
 
-- **Databricks Workspace** with Unity Catalog enabled
-- **SQL Warehouse** (serverless or pro) accessible from the app's service principal
-- **Service Principal** with OAuth secret (for deployment and runtime auth)
-- **Databricks CLI** v0.200+ (for deployment)
-- **Node.js** 18+ and **npm** (for frontend build)
-- **Python** 3.10+ (for backend)
-
----
-
-## Setup & Deployment
-
-### 1. Create a Service Principal
-
-In Databricks Account Console or via the CLI:
-
-```bash
-# Create the service principal
-databricks account service-principals create \
-  --display-name "lineage-explorer-sp" \
-  --profile your-account-profile
-
-# Note the application_id (client_id) from the output
-# Then create an OAuth secret for it:
-databricks account service-principals secrets create \
-  --service-principal-id <sp-id> \
-  --profile your-account-profile
-
-# Note the secret value — this is shown only once
-```
-
-Or create via the Databricks UI: **Account Console > User Management > Service Principals > Add Service Principal > Generate OAuth Secret**.
-
-### 2. Configure Databricks CLI for SP Auth
-
-```bash
-# Create a CLI profile using the service principal
-databricks auth login \
-  --host https://your-workspace.cloud.databricks.com \
-  --client-id <sp-client-id> \
-  --client-secret <sp-secret> \
-  --profile sp-lineage
-```
-
-Verify it works:
-```bash
-databricks auth profiles | grep sp-lineage
-# Should show: sp-lineage  https://your-workspace...  YES
-```
-
-### 3. Clone and Install
-
-```bash
-git clone <repo-url> && cd lineage-explorer
-
-# Backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Frontend
-cd frontend
-npm install
-npm run build
-cd ..
-```
-
-### 4. Configure
-
-Edit `databricks.yml`:
-- Set `workspace.host` to your Databricks workspace URL
-- Set `variables.warehouse_id.default` to your SQL warehouse ID
-
-Edit `app.yaml`:
-- Set `DATABRICKS_WAREHOUSE_ID` to your SQL warehouse ID
-
-### 5. Create the Databricks App
-
-```bash
-databricks apps create lineage-explorer \
-  --description "Unity Catalog Lineage Explorer" \
-  --profile sp-lineage
-```
-
-This creates the app and its **auto-generated service principal** (different from your deployment SP). The app SPN is what the running app uses to authenticate with Databricks at runtime.
-
-### 6. Grant Permissions to the App Service Principal
-
-Get the app's SPN client ID:
-```bash
-databricks apps get lineage-explorer --profile sp-lineage -o json \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['service_principal_client_id'])"
-```
-
-Then grant **minimum required privileges** (no SELECT needed):
-
-```sql
--- Replace <app-spn-client-id> with the app's service_principal_client_id
-
--- Minimum required (app is fully functional with just these):
-GRANT USE CATALOG ON CATALOG your_catalog TO `<app-spn-client-id>`;
-GRANT BROWSE ON CATALOG your_catalog TO `<app-spn-client-id>`;
-GRANT USE SCHEMA ON SCHEMA your_catalog.your_schema TO `<app-spn-client-id>`;
-
--- SQL warehouse access:
-GRANT CAN_USE ON WAREHOUSE your_warehouse TO `<app-spn-client-id>`;
-```
-
-That's it. The app works with these 4 grants. **SELECT is not required.**
-
-#### Optional: enhanced lineage (if you want richer edge detection)
-
-```sql
--- SELECT on schema: enables view definition parsing for more accurate view lineage
-GRANT SELECT ON SCHEMA your_catalog.your_schema TO `<app-spn-client-id>`;
-
--- System lineage tables (requires metastore admin): enables real lineage from Unity Catalog
-GRANT USE CATALOG ON CATALOG system TO `<app-spn-client-id>`;
-GRANT USE SCHEMA ON SCHEMA system.access TO `<app-spn-client-id>`;
-GRANT SELECT ON SCHEMA system.access TO `<app-spn-client-id>`;
-GRANT USE SCHEMA ON SCHEMA system.query TO `<app-spn-client-id>`;
-GRANT SELECT ON SCHEMA system.query TO `<app-spn-client-id>`;
-```
-
-### 7. Deploy
-
-```bash
-# Upload source code to workspace
-databricks workspace import-dir . \
-  /Workspace/Users/you@company.com/lineage-explorer \
-  --overwrite --profile sp-lineage
-
-# Start the app (if not already running)
-databricks apps start lineage-explorer --profile sp-lineage
-
-# Deploy
-databricks apps deploy lineage-explorer \
-  --source-code-path /Workspace/Users/you@company.com/lineage-explorer \
-  --profile sp-lineage
-```
-
-Or use DABs:
-```bash
-databricks bundle deploy --target dev --profile sp-lineage \
-  --var="warehouse_id=your_warehouse_id"
-```
-
-### 8. Access
-
-The app URL will be shown after deployment. It follows the pattern:
-```
-https://lineage-explorer-<workspace-id>.aws.databricksapps.com
-```
-
-Login is handled automatically via Databricks OAuth SSO. Users accessing the app authenticate with their own Databricks identity — the app's SPN handles backend API calls.
-
----
-
-## Authentication Reference
-
-### How auth works at each stage
-
-| Stage | Who authenticates | Method |
-|-------|------------------|--------|
-| **CLI deployment** (`databricks apps deploy`) | Your deployment SP or user | SP OAuth M2M via `--profile` |
-| **App runtime** (backend API calls) | App's auto-generated SPN | Automatic — injected by Databricks Apps runtime |
-| **User access** (browser) | End user | Databricks OAuth SSO — transparent redirect |
-| **Stress test script** | Your SP or user | SP OAuth M2M or PAT via env vars |
-
-### Service Principal vs Personal Access Token
-
-| | Service Principal (SP) | Personal Access Token (PAT) |
-|-|----------------------|---------------------------|
-| **Auth type** | OAuth 2.0 client credentials (M2M) | Static bearer token |
-| **Expiration** | Secret has configurable lifetime | Configurable (default 90 days) |
-| **Identity** | Machine identity, auditable | Tied to a human user |
-| **Rotation** | Generate new secret, revoke old | Regenerate token |
-| **Recommended for** | Production, CI/CD, automation | Local dev only |
-| **Env vars** | `DATABRICKS_CLIENT_ID` + `DATABRICKS_CLIENT_SECRET` | `DATABRICKS_TOKEN` |
-
-### Minimum SP permissions (no SELECT required)
-
-The app's auto-generated service principal needs only:
-
-| Privilege | On | Required? | What it enables |
-|---|---|---|---|
-| `USE CATALOG` | Target catalog | **Required** | Access the catalog |
-| `BROWSE` | Target catalog | **Required** | List catalogs, see table/column metadata in information_schema |
-| `USE SCHEMA` | Target schema(s) | **Required** | Access schemas, see tables/columns |
-| `CAN_USE` | SQL Warehouse | **Required** | Execute SQL statements |
-| `SELECT` | Target schema(s) | Optional | View definition parsing (richer view lineage) |
-| `SELECT` | `system.access` | Optional | Real lineage from system.access.table_lineage |
-| `SELECT` | `system.query` | Optional | Query history parsing for CTAS lineage |
-
-### How lineage quality scales with privileges
-
-| Privileges granted | Lineage strategies available | Approx edge coverage |
-|---|---|---|
-| Minimum only (no SELECT) | Naming conventions (`raw_*`→`cleaned_*`) + column overlap heuristic | ~60-70% |
-| + SELECT on schema | Above + view definition parsing | ~85-90% |
-| + SELECT on system tables | Real Unity Catalog lineage (best quality) | ~100% |
-
-The app **never crashes** regardless of privilege level — all optional queries are wrapped in try/except with graceful fallback.
-
----
-
-## Local Development
-
-### With Service Principal (recommended)
-
-```bash
-# Terminal 1 — Backend
-source .venv/bin/activate
-export DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
-export DATABRICKS_CLIENT_ID=your-sp-client-id
-export DATABRICKS_CLIENT_SECRET=your-sp-secret
-export DATABRICKS_WAREHOUSE_ID=your_warehouse_id
-uvicorn backend.main:app --reload --port 8000
-
-# Terminal 2 — Frontend (with hot reload + API proxy)
-cd frontend
-npm run dev    # Starts on http://localhost:5173, proxies /api to :8000
-```
-
-### With PAT (alternative for quick local testing)
-
-```bash
-# Terminal 1 — Backend
-source .venv/bin/activate
-export DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
-export DATABRICKS_TOKEN=dapiXXXXXXXX
-export DATABRICKS_WAREHOUSE_ID=your_warehouse_id
-uvicorn backend.main:app --reload --port 8000
-```
-
----
-
-## Stress Testing
-
-The included `generate_stress_test.py` creates 150 tables across 6 business domains (ecommerce, finance, HR, marketing, supply chain, support) with bronze/silver/gold layers and cross-domain dependencies.
-
-It uses the Databricks SDK for authentication — works with both SP and PAT.
-
-```bash
-# With Service Principal:
-export DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
-export DATABRICKS_CLIENT_ID=your-sp-client-id
-export DATABRICKS_CLIENT_SECRET=your-sp-secret
-export DATABRICKS_WAREHOUSE_ID=your_warehouse_id
-export STRESS_TEST_CATALOG=your_catalog
-export STRESS_TEST_SCHEMA=lineage_stress_test
-
-# Create the schema first (run in Databricks SQL):
-#   CREATE SCHEMA your_catalog.lineage_stress_test;
-
-python3 generate_stress_test.py
-```
-
----
-
-## Concurrency & Thundering Herd Protection
-
-### Scenario 1: Warm cache + 4,000 concurrent users
-
-When the cache is already populated (most common scenario after first load):
-
-1. All 4,000 requests hit **in-memory cache** — a Python dict lookup
-2. Zero DBSQL queries fired
-3. **Expected latency: <1ms per request** (limited only by FastAPI HTTP overhead)
-4. The in-memory cache is shared across all threads in the same process
-
-### Scenario 2: Cold cache + 4,000 concurrent users (thundering herd)
-
-When 4,000 users click "Generate Lineage" simultaneously on a fresh app (or after cache expiry):
-
-**Without protection:** All 4,000 requests would fan out to DBSQL, overwhelming the warehouse with 4,000 duplicate queries for the same data.
-
-**With request coalescing (implemented):** The app uses a single-flight pattern:
-
-1. The **first request** acquires a lock and becomes the "leader" — it queries DBSQL system tables
-2. The remaining **3,999 requests** detect an in-flight fetch for the same cache key and **wait on a `threading.Event`**
-3. When the leader completes (7-18s), it stores the result in cache and signals all waiters
-4. All 3,999 waiting threads read from cache and return immediately
-
-**Result:** Only 1 DBSQL query fires, regardless of concurrency. Total wall-clock time = time for a single query + negligible signal propagation.
-
-| Phase | Queries Fired | p50 Latency | p95 Latency |
-|-------|--------------|-------------|-------------|
-| Cold cache, first request | 1 | ~10s | ~18s |
-| All subsequent (warm) | 0 | <1ms | <1ms |
-
----
-
-## Cost & Performance Comparison (All Options)
-
-Three deployment options exist for this app. This repo is **Option 1 (Direct)**.
+Three deployment options exist. This repo is **Option 1 (Direct)**.
 
 | Dimension | Option 1: Direct (this repo) | Option 2: Delta Cache | Option 3: Lakebase |
 |-----------|-----------------------------|-----------------------|-------------------|
-| **Architecture** | In-memory TTL only | In-memory → Delta tables → DBSQL | In-memory → Lakebase PostgreSQL → DBSQL |
 | **Warm cache latency** | <1ms | <1ms | <1ms |
-| **Cold cache latency** | 7-18s (DBSQL) | 200-800ms (Delta via DBSQL) | 30ms (Lakebase PostgreSQL) |
-| **Thundering herd** | 1 DBSQL query (coalesced) | 1 DBSQL query (coalesced) | 1 Lakebase query (coalesced) |
-| **Cache survives restart** | No | Yes (Delta tables) | Yes (PostgreSQL) |
-| **DBSQL warehouse** | Required (reads) | Required (reads + cache) | Required (refresh job only) |
-| **Additional infra** | None | Serverless job | Lakebase project + serverless job |
-| **Monthly cost estimate** | ~$55-65 | ~$60-77 | ~$95-117 |
-| **Best for** | Low traffic, simple setup | Medium traffic, cost-sensitive | High traffic (4000+ users), production |
-
-**Cost breakdown:**
-- **Option 1:** DBSQL warehouse (always-on for user queries) ~$50-60/mo + App compute ~$5/mo
-- **Option 2:** DBSQL warehouse ~$50-60/mo + refresh job ~$5-12/mo + App compute ~$5/mo
-- **Option 3:** DBSQL warehouse (refresh only, can be on-demand) ~$20-30/mo + Lakebase ~$40-55/mo + refresh job ~$5-12/mo + App compute ~$5/mo
-
-**Recommendation:** Option 1 (this repo) for demos and low traffic. Option 3 for production with high concurrency and sub-second cold reads.
+| **Cold cache latency** | 7-18s (DBSQL) | 200-800ms (Delta) | 30ms (PostgreSQL) |
+| **Cache survives restart** | No | Yes | Yes |
+| **Monthly cost** | ~$55-65 | ~$60-77 | ~$95-117 |
+| **Best for** | Demos, low traffic | Medium traffic | Production, 4000+ users |
 
 ---
 
-## Features
+## Troubleshooting
 
-- **Interactive DAG** — Pan, zoom, minimap navigation across large schemas
-- **Table metadata on hover** — Owner, type, column count, created/updated dates, upstream/downstream counts
-- **Path highlighting** — Click or hover a table to highlight its full upstream + downstream lineage path
-- **Column lineage mode** — Toggle on, expand a table, click a column to see column-level flow
-- **Cmd+K search** — Quickly find and navigate to any table
-- **Responsive layout** — ELK.js layered algorithm handles complex DAGs with minimal edge crossings
-- **Animated edges** — Glowing indigo edges with animated dashes and traveling dots for highlighted paths
-- **Type indicators** — Color-coded badges for TABLE (blue), VIEW (green), MATERIALIZED VIEW (amber)
-- **Zoom persistence** — Zoom in to read table names on large schemas; your zoom level is preserved when selecting/hovering tables
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| "No SQL warehouse available" | `DATABRICKS_WAREHOUSE_ID` not set | Pass `--var warehouse_id=<id>` during `bundle deploy` |
+| Empty lineage graph | App SPN lacks BROWSE on catalog | Grant `BROWSE` on the target catalog to the app SPN |
+| Catalog not visible in app | App SPN lacks USE CATALOG | Grant `USE CATALOG` on the target catalog to the app SPN |
+| Only naming-convention edges | `system.access` not accessible | Grant `SELECT` on `system.access` to the app SPN |
+| Query history timeout on cold start | Serverless warehouse cold + large history | Normal — app falls back to other inference methods. Lineage coverage improves on subsequent requests |
+| `bundle deploy` host mismatch | Wrong profile or missing `--profile` flag | Use `--profile <name>` matching your `~/.databrickscfg` |
+| `bundle deploy` missing variable | No `--var warehouse_id` provided | Add `--var warehouse_id=<id>` to the deploy command |
+| Edges misaligned after expand | React Flow handle cache stale | Fixed — `useUpdateNodeInternals` called after animation |
+| Blank white screen | Unhandled React error | Fixed — ErrorBoundary catches and shows recovery UI |
+| 429 Too Many Requests | Rate limit exceeded | Wait and retry, or increase via `RATE_LIMIT_MAX_REQUESTS` env var |
+| 400 "Invalid catalog" | Special chars in identifier | Use only alphanumeric + underscores |
+
+---
+
+## SPN Deployment Test Report
+
+> **Tested**: 2026-03-24 | **Workspace**: `fevm-ws-us-e2-vish-aws-databricks-1.cloud.databricks.com`
+> **Test data**: 20-layer deep lineage chain (20 tables, 56 edges) in `stress_test` schema
+> **Method**: Deployed app via external SPN, tested all 5 API endpoints, documented every permission failure
+
+### Permission Gaps Found and Fixed
+
+| # | Missing Permission | Error Observed | Resolution |
+|---|-------------------|----------------|------------|
+| 1 | `USE CATALOG` on target catalog for deploying SPN | `INSUFFICIENT_PERMISSIONS: User does not have USE CATALOG` | `GRANT USE CATALOG ON CATALOG <cat> TO <spn>` |
+| 2 | `BROWSE` on target catalog for deploying SPN | Catalog silently missing from `catalogs.list()` | `GRANT BROWSE ON CATALOG <cat> TO <spn>` |
+| 3 | `USE SCHEMA` on target schema for deploying SPN | Schema absent from `schemas.list()` | `GRANT USE SCHEMA ON SCHEMA <cat>.<sch> TO <spn>` |
+| 4 | `CAN_USE` on SQL Warehouse for deploying SPN | Not documented in original README | Grant via Permissions API (PUT) using SPN `client_id` as `service_principal_name` |
+
+### Parameterization Bugs Found and Fixed
+
+| # | Bug | Fix Applied |
+|---|-----|-------------|
+| 1 | Hardcoded warehouse ID (`9711dcb3942dac99`) in `app.yaml` | Replaced with placeholder; DABs uses `${var.warehouse_id}` |
+| 2 | Hardcoded workspace hosts in `databricks.yml` | Removed; now uses `--profile` flag |
+| 3 | Dual config (`app.yaml` + `databricks.yml`) | `databricks.yml` is now the canonical config; `app.yaml` is fallback-only |
+| 4 | Hardcoded catalog/warehouse/profile in `create_stress_test.py` | Parameterized via env vars (matching `generate_stress_test.py` pattern) |
+| 5 | Stress test scripts deployed to app container | Added to `.databricksignore` |
+| 6 | Duplicate `requirements.txt` (root vs backend/) with different pinning | Removed `backend/requirements.txt`; root file is authoritative |
+| 7 | SQL timeout hardcoded at 50s | Configurable via `SQL_WAIT_TIMEOUT` env var |
+| 8 | Query history lookback hardcoded at 7 days | Configurable via `QUERY_HISTORY_DAYS` env var |
+| 9 | Query history limit hardcoded at 200 | Configurable via `QUERY_HISTORY_LIMIT` env var |
+| 10 | Rate limiting hardcoded at 60 req/min | Configurable via `RATE_LIMIT_MAX_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS` |
+
+### API Note: `wait_timeout` Max is 50s
+
+The Databricks SQL Statement Execution API enforces a hard limit: `wait_timeout` must be 0 (disable wait) or between 5-50 seconds. Values above 50s cause `BAD_REQUEST`. The `SQL_WAIT_TIMEOUT` env var defaults to `50s` (the maximum).
 
 ---
 

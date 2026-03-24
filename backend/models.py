@@ -33,6 +33,8 @@ class LineageResponse(BaseModel):
     edges: list[LineageEdge]
     cached: bool = False
     cached_at: Optional[str] = None
+    cache_expires_at: Optional[str] = None
+    fetch_duration_ms: Optional[int] = None
 
 
 class ColumnLineageResponse(BaseModel):

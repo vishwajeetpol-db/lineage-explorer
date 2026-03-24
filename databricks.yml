@@ -3,14 +3,14 @@ bundle:
 
 variables:
   warehouse_id:
-    description: "SQL Warehouse ID for executing queries"
+    description: "SQL Warehouse ID for executing queries (required)"
 
 targets:
   dev:
     mode: development
     default: true
-    workspace:
-      host: https://your-workspace.cloud.databricks.com
+    # No hardcoded host — uses CLI profile:
+    #   databricks bundle deploy -t dev --profile <your-profile> --var warehouse_id=<id>
     resources:
       apps:
         lineage-explorer:
@@ -24,15 +24,15 @@ targets:
               - --host
               - 0.0.0.0
               - --port
-              - 8000
+              - "8000"
             env:
               - name: DATABRICKS_WAREHOUSE_ID
                 value: ${var.warehouse_id}
 
   prod:
     mode: production
-    workspace:
-      host: https://your-workspace.cloud.databricks.com
+    # No hardcoded host — uses CLI profile:
+    #   databricks bundle deploy -t prod --profile <your-profile> --var warehouse_id=<id>
     resources:
       apps:
         lineage-explorer:
@@ -46,7 +46,7 @@ targets:
               - --host
               - 0.0.0.0
               - --port
-              - 8000
+              - "8000"
             env:
               - name: DATABRICKS_WAREHOUSE_ID
                 value: ${var.warehouse_id}

@@ -18,6 +18,8 @@ interface LineageState {
   // Cache metadata
   cached: boolean;
   cachedAt: string | null;
+  cacheExpiresAt: string | null;
+  fetchDurationMs: number | null;
 
   // UI state
   loading: boolean;
@@ -36,7 +38,7 @@ interface LineageState {
   setLiveMode: (live: boolean) => void;
   setCatalogs: (catalogs: string[]) => void;
   setSchemas: (schemas: string[]) => void;
-  setLineageData: (nodes: TableNode[], edges: LineageEdge[], cached?: boolean, cachedAt?: string | null) => void;
+  setLineageData: (nodes: TableNode[], edges: LineageEdge[], cached?: boolean, cachedAt?: string | null, cacheExpiresAt?: string | null, fetchDurationMs?: number | null) => void;
   setColumnEdges: (edges: ColumnLineageEdge[]) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
@@ -61,6 +63,8 @@ export const useLineageStore = create<LineageState>((set) => ({
   columnEdges: [],
   cached: false,
   cachedAt: null,
+  cacheExpiresAt: null,
+  fetchDurationMs: null,
   loading: false,
   error: null,
   expandedNodes: new Set(),
@@ -70,13 +74,13 @@ export const useLineageStore = create<LineageState>((set) => ({
   searchQuery: "",
   searchOpen: false,
 
-  setCatalog: (catalog) => set({ catalog, schema: "", schemas: [], nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null, cached: false, cachedAt: null }),
-  setSchema: (schema) => set({ schema, nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null, cached: false, cachedAt: null }),
+  setCatalog: (catalog) => set({ catalog, schema: "", schemas: [], nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null, cached: false, cachedAt: null, cacheExpiresAt: null, fetchDurationMs: null }),
+  setSchema: (schema) => set({ schema, nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null, cached: false, cachedAt: null, cacheExpiresAt: null, fetchDurationMs: null }),
   setColumnLineageEnabled: (enabled) => set({ columnLineageEnabled: enabled, columnEdges: [], selectedColumn: null, expandedNodes: new Set() }),
   setLiveMode: (live) => set({ liveMode: live }),
   setCatalogs: (catalogs) => set({ catalogs }),
   setSchemas: (schemas) => set({ schemas }),
-  setLineageData: (nodes, edges, cached, cachedAt) => set({ nodes, edges, loading: false, error: null, cached: cached ?? false, cachedAt: cachedAt ?? null }),
+  setLineageData: (nodes, edges, cached, cachedAt, cacheExpiresAt, fetchDurationMs) => set({ nodes, edges, loading: false, error: null, cached: cached ?? false, cachedAt: cachedAt ?? null, cacheExpiresAt: cacheExpiresAt ?? null, fetchDurationMs: fetchDurationMs ?? null }),
   setColumnEdges: (columnEdges) => set({ columnEdges }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error, loading: false }),

@@ -49,6 +49,8 @@ export interface LineageResponse {
   edges: LineageEdge[];
   cached?: boolean;
   cached_at?: string | null;
+  cache_expires_at?: string | null;
+  fetch_duration_ms?: number | null;
 }
 
 export interface ColumnLineageResponse {

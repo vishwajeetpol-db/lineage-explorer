@@ -61,6 +61,9 @@ _cache: dict[str, tuple[float, object]] = {}
 _cache_lock = threading.Lock()
 _inflight: dict[str, threading.Event] = {}  # keys currently being fetched
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "28800"))  # default 8 hours
+SQL_WAIT_TIMEOUT = os.environ.get("SQL_WAIT_TIMEOUT", "50s")  # max 50s per Databricks API limit (0s or 5-50s)
+QUERY_HISTORY_DAYS = int(os.environ.get("QUERY_HISTORY_DAYS", "7"))  # lookback window for lineage inference
+QUERY_HISTORY_LIMIT = int(os.environ.get("QUERY_HISTORY_LIMIT", "200"))  # max query history rows to scan
 
 
 def _cache_get(key: str):
@@ -74,6 +77,15 @@ def _cache_get(key: str):
             del _cache[key]
             return None
         return val
+
+
+def _cache_get_ts(key: str) -> float | None:
+    """Return the timestamp when a cache entry was set, or None."""
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry is None:
+            return None
+        return entry[0]
 
 
 def _cache_set(key: str, val: object):
@@ -136,7 +148,7 @@ def _execute_sql(client: WorkspaceClient, sql: str, catalog: str = None) -> list
         statement=sql,
         warehouse_id=warehouse_id,
         catalog=catalog,
-        wait_timeout="50s",
+        wait_timeout=SQL_WAIT_TIMEOUT,
     )
 
     if resp.status.state == StatementState.FAILED:
@@ -232,13 +244,13 @@ def _infer_lineage(client: WorkspaceClient, catalog: str, schema: str, schema_ta
         SELECT DISTINCT
             statement_text
         FROM system.query.history
-        WHERE start_time > DATEADD(DAY, -7, NOW())
+        WHERE start_time > DATEADD(DAY, -{QUERY_HISTORY_DAYS}, NOW())
         AND statement_type IN ('CREATE_TABLE_AS_SELECT', 'INSERT')
         AND (
             LOWER(statement_text) LIKE '%{catalog.lower()}.{schema.lower()}%'
             OR LOWER(statement_text) LIKE '%{schema.lower()}.%'
         )
-        LIMIT 200
+        LIMIT {QUERY_HISTORY_LIMIT}
         """
         history_rows = _execute_sql(client, history_sql)
         for hr in history_rows:
@@ -336,31 +348,47 @@ def _infer_lineage(client: WorkspaceClient, catalog: str, schema: str, schema_ta
     return deduped
 
 
+def _add_cache_metadata(result: LineageResponse, cache_key: str, fetch_ms: int | None = None, from_cache: bool = False) -> LineageResponse:
+    """Attach cache metadata to the response."""
+    from datetime import datetime, timezone
+    cache_ts = _cache_get_ts(cache_key)
+    if cache_ts is not None:
+        result.cached = from_cache
+        result.cached_at = datetime.fromtimestamp(cache_ts, tz=timezone.utc).isoformat()
+        expires = cache_ts + CACHE_TTL_SECONDS
+        result.cache_expires_at = datetime.fromtimestamp(expires, tz=timezone.utc).isoformat()
+    if fetch_ms is not None:
+        result.fetch_duration_ms = fetch_ms
+    return result
+
+
 def get_table_lineage(catalog: str, schema: str, skip_cache: bool = False) -> LineageResponse:
     cache_key = f"lineage:{catalog}.{schema}"
 
     if not skip_cache:
         cached = _cache_get(cache_key)
         if cached is not None:
-            return cached
+            return _add_cache_metadata(cached, cache_key, fetch_ms=0, from_cache=True)
 
         # Single-flight: if another thread is already fetching this key, wait for it
         if not _cache_acquire(cache_key):
             logger.info(f"Request coalescing: waiting for in-flight fetch of {cache_key}")
             result = _cache_wait(cache_key)
             if result is not None:
-                return result
+                return _add_cache_metadata(result, cache_key, fetch_ms=0, from_cache=True)
             # Leader failed — backoff before retrying to avoid stampede
             time.sleep(random.uniform(0.05, 0.5))
             if not _cache_acquire(cache_key):
                 result = _cache_wait(cache_key)
                 if result is not None:
-                    return result
+                    return _add_cache_metadata(result, cache_key, fetch_ms=0, from_cache=True)
                 # Still no luck — proceed solo (safe: just a redundant query)
 
     try:
+        fetch_start = time.time()
         result = _fetch_table_lineage(catalog, schema, cache_key)
-        return result
+        fetch_ms = int((time.time() - fetch_start) * 1000)
+        return _add_cache_metadata(result, cache_key, fetch_ms=fetch_ms, from_cache=False)
     finally:
         _cache_release(cache_key)
 
@@ -524,7 +552,7 @@ def get_columns(catalog: str, schema: str, table: str, skip_cache: bool = False)
         _cache_release(cache_key)
 
 
-def get_column_lineage(catalog: str, schema: str, table: str, column: str) -> ColumnLineageResponse:
+def get_column_lineage(catalog: str, schema: str, table: str, column: str, skip_cache: bool = False) -> ColumnLineageResponse:
     client = _get_client()
 
     full_table = f"{catalog}.{schema}.{table}"
