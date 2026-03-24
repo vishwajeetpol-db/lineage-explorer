@@ -276,7 +276,15 @@ function LineageCanvas() {
     if (revealCounter < 0) return;
 
     const maxOrder = Math.max(...flowNodes.map((n) => n.data.revealOrder ?? 0), 0);
-    if (revealCounter > maxOrder) return;
+    if (revealCounter > maxOrder) {
+      // All nodes revealed — re-fit viewport now that nodes are at full scale/opacity.
+      // The initial fitView fires before reveal (nodes at opacity:0/scale:0.95),
+      // which can miscalculate the bounding box on large graphs (20+ nodes).
+      setTimeout(() => {
+        reactFlowInstance.fitView({ padding: 0.15, duration: 400 });
+      }, 100);
+      return;
+    }
 
     const timer = setInterval(() => {
       setRevealCounter((c) => {
@@ -288,7 +296,7 @@ function LineageCanvas() {
       });
     }, 50);
     return () => clearInterval(timer);
-  }, [revealCounter, flowNodes.length]);
+  }, [revealCounter, flowNodes.length, reactFlowInstance]);
 
   // Update revealed state on nodes and edge visibility based on revealCounter
   useEffect(() => {
