@@ -1,3 +1,8 @@
+# This file is ONLY used for manual deployment (databricks apps create / deploy).
+# For standard deployment, use databricks.yml via:
+#   databricks bundle deploy -t dev --profile <your-profile> --var warehouse_id=<id>
+#
+# If you must deploy manually, replace <your-warehouse-id> below.
 command:
   - uvicorn
   - backend.main:app
@@ -7,14 +12,4 @@ command:
   - 8000
 env:
   - name: DATABRICKS_WAREHOUSE_ID
-    value: "9711dcb3942dac99"
-  # When running as a Databricks App, auth is automatic via the app's
-  # built-in service principal — no need to set credentials below.
-  #
-  # For standalone deployment outside Databricks Apps, uncomment and set:
-  # - name: DATABRICKS_HOST
-  #   value: "https://your-workspace.cloud.databricks.com"
-  # - name: DATABRICKS_CLIENT_ID
-  #   value: "your-sp-client-id"
-  # - name: DATABRICKS_CLIENT_SECRET
-  #   value: "your-sp-secret"
+    value: "<your-warehouse-id>"

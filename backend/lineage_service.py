@@ -61,6 +61,9 @@ _cache: dict[str, tuple[float, object]] = {}
 _cache_lock = threading.Lock()
 _inflight: dict[str, threading.Event] = {}  # keys currently being fetched
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "28800"))  # default 8 hours
+SQL_WAIT_TIMEOUT = os.environ.get("SQL_WAIT_TIMEOUT", "50s")  # max 50s per Databricks API limit (0s or 5-50s)
+QUERY_HISTORY_DAYS = int(os.environ.get("QUERY_HISTORY_DAYS", "7"))  # lookback window for lineage inference
+QUERY_HISTORY_LIMIT = int(os.environ.get("QUERY_HISTORY_LIMIT", "200"))  # max query history rows to scan
 
 
 def _cache_get(key: str):
@@ -136,7 +139,7 @@ def _execute_sql(client: WorkspaceClient, sql: str, catalog: str = None) -> list
         statement=sql,
         warehouse_id=warehouse_id,
         catalog=catalog,
-        wait_timeout="50s",
+        wait_timeout=SQL_WAIT_TIMEOUT,
     )
 
     if resp.status.state == StatementState.FAILED:
@@ -232,13 +235,13 @@ def _infer_lineage(client: WorkspaceClient, catalog: str, schema: str, schema_ta
         SELECT DISTINCT
             statement_text
         FROM system.query.history
-        WHERE start_time > DATEADD(DAY, -7, NOW())
+        WHERE start_time > DATEADD(DAY, -{QUERY_HISTORY_DAYS}, NOW())
         AND statement_type IN ('CREATE_TABLE_AS_SELECT', 'INSERT')
         AND (
             LOWER(statement_text) LIKE '%{catalog.lower()}.{schema.lower()}%'
             OR LOWER(statement_text) LIKE '%{schema.lower()}.%'
         )
-        LIMIT 200
+        LIMIT {QUERY_HISTORY_LIMIT}
         """
         history_rows = _execute_sql(client, history_sql)
         for hr in history_rows:

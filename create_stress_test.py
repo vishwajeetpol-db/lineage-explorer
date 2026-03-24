@@ -5,18 +5,35 @@ Create a 20-level deep lineage stress test in Databricks Unity Catalog.
 
 IMPORTANT: All cross-domain joins use (SELECT ... LIMIT 1) subqueries
 to prevent row explosion from CROSS JOINs while still capturing lineage.
+
+Usage:
+    export DATABRICKS_HOST="https://your-workspace.cloud.databricks.com"
+    export DATABRICKS_TOKEN="dapi..."          # or use SP OAuth env vars
+    export DATABRICKS_WAREHOUSE_ID="abc123..."
+    export STRESS_TEST_CATALOG="your_catalog"
+    export STRESS_TEST_SCHEMA="lineage_stress_test"  # optional, has default
+    python3 create_stress_test.py
 """
 
+import os
 import time
 import sys
 from databricks.sdk import WorkspaceClient
 
-CATALOG = "ws_us_e2_vish_aws_catalog"
-SCHEMA = "lineage_stress_test"
-WAREHOUSE_ID = "9711dcb3942dac99"
+CATALOG = os.environ.get("STRESS_TEST_CATALOG", "")
+SCHEMA = os.environ.get("STRESS_TEST_SCHEMA", "lineage_stress_test")
+WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
+
+if not CATALOG:
+    print("ERROR: Set STRESS_TEST_CATALOG environment variable")
+    sys.exit(1)
+if not WAREHOUSE_ID:
+    print("ERROR: Set DATABRICKS_WAREHOUSE_ID environment variable")
+    sys.exit(1)
+
 FQN = f"{CATALOG}.{SCHEMA}"
 
-w = WorkspaceClient(profile="fe-vm-vish-aws")
+w = WorkspaceClient()  # uses DATABRICKS_HOST + token/SP env vars automatically
 
 
 def run_sql(sql: str, desc: str = ""):
