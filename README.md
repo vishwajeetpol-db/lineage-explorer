@@ -187,31 +187,44 @@ The app **never crashes** regardless of privilege level — all optional queries
 ## Architecture
 
 ```
-+-------------------------------------------------------------+
-|                    Databricks App                            |
-|                                                             |
-|  +--------------+        +------------------------------+   |
-|  |   FastAPI     |        |       React Frontend         |   |
-|  |   Backend     |        |                              |   |
-|  |              |------->|  React Flow (DAG canvas)     |   |
-|  |  /api/       |        |  ELK.js (layered layout)     |   |
-|  |  /health     |        |  Framer Motion (animations)  |   |
-|  |              |        |  Zustand (state management)  |   |
-|  |  Middleware:  |        |  Tailwind CSS (dark theme)   |   |
-|  |  - Rate limit |        |  ErrorBoundary (crash guard) |   |
-|  |  - Validation |        |                              |   |
-|  |  - Sanitize   |        |  Client-side column lineage  |   |
-|  +------+-------+        +------------------------------+   |
-|         |                                                    |
-|         |  Databricks SDK (unified auth)                     |
-|         v                                                    |
-|  +------------------------------------------------------+    |
-|  |  Unity Catalog                                        |    |
-|  |  - information_schema.tables / columns / views        |    |
-|  |  - system.access.table_lineage / column_lineage       |    |
-|  |  - system.query.history                               |    |
-|  +------------------------------------------------------+    |
-+-------------------------------------------------------------+
+┌─────────────────────────────────────────────────────────────────────┐
+│                         DATABRICKS APP                              │
+│                                                                     │
+│   ┌──────────────────────┐          ┌──────────────────────────┐    │
+│   │    FastAPI Backend    │          │     React Frontend       │    │
+│   │                      │  JSON    │                          │    │
+│   │  Endpoints:          │ ──────►  │  React Flow  (DAG)       │    │
+│   │    /api/lineage      │          │  ELK.js     (layout)     │    │
+│   │    /api/columns      │          │  Framer     (animation)  │    │
+│   │    /api/catalogs     │          │  Zustand    (state)      │    │
+│   │    /api/schemas      │          │  Tailwind   (dark UI)    │    │
+│   │    /health           │          │                          │    │
+│   │                      │          │  Column lineage tracing  │    │
+│   │  Middleware:          │          │  ErrorBoundary (guard)   │    │
+│   │    Rate limiting      │          └──────────────────────────┘    │
+│   │    Input validation   │                                         │
+│   │    Error sanitization │                                         │
+│   └──────────┬───────────┘                                          │
+│              │                                                      │
+│              │  In-memory TTL cache (8h)                             │
+│              │  Request coalescing (single-flight)                   │
+│              │                                                      │
+│              ▼                                                      │
+│   ┌──────────────────────┐                                          │
+│   │   Databricks SDK     │  OAuth auto-injected (no credentials)    │
+│   └──────────┬───────────┘                                          │
+│              │                                                      │
+└──────────────┼──────────────────────────────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                       UNITY CATALOG                                 │
+│                                                                     │
+│   information_schema          system.access          system.query   │
+│   ├── tables                  ├── table_lineage      └── history    │
+│   ├── columns                 └── column_lineage                    │
+│   └── views                                                         │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Authentication Model
