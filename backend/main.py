@@ -3,6 +3,7 @@ import re
 import time
 import asyncio
 import logging
+import threading
 from collections import defaultdict
 
 RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("RATE_LIMIT_MAX_REQUESTS", "60"))
@@ -19,10 +20,81 @@ from backend.lineage_service import (
     get_column_lineage,
     get_columns,
     invalidate_cache,
+    _get_client,
 )
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Admin group check — cached per user to avoid repeated API calls
+# ---------------------------------------------------------------------------
+ADMIN_GROUP_NAME = os.environ.get("ADMIN_GROUP_NAME", "admins")
+_admin_cache: dict[str, tuple[float, bool]] = {}
+_admin_cache_lock = threading.Lock()
+ADMIN_CACHE_TTL = 600  # 10 minutes
+
+
+def _is_admin(user_email: str) -> bool:
+    """Check if a user belongs to the workspace admins group. Results cached 10min."""
+    now = time.time()
+    with _admin_cache_lock:
+        entry = _admin_cache.get(user_email)
+        if entry and now - entry[0] < ADMIN_CACHE_TTL:
+            return entry[1]
+
+    try:
+        w = _get_client()
+        # Get current user's groups by listing group membership
+        groups = list(w.groups.list(filter=f'displayName eq "{ADMIN_GROUP_NAME}"'))
+        if not groups:
+            logger.warning(f"Admin group '{ADMIN_GROUP_NAME}' not found in workspace")
+            with _admin_cache_lock:
+                _admin_cache[user_email] = (now, False)
+            return False
+
+        admin_group = groups[0]
+        is_member = False
+        if admin_group.members:
+            # Check if user email matches any member
+            member_ids = [m.display for m in admin_group.members if m.display]
+            is_member = user_email in member_ids
+            if not is_member:
+                # Also check by value (which may be user ID)
+                # Resolve user email to ID
+                users = list(w.users.list(filter=f'userName eq "{user_email}"'))
+                if users:
+                    user_id = users[0].id
+                    is_member = any(m.value == user_id for m in admin_group.members)
+
+        with _admin_cache_lock:
+            _admin_cache[user_email] = (now, is_member)
+        logger.info(f"Admin check for {user_email}: {is_member}")
+        return is_member
+    except Exception as e:
+        logger.error(f"Error checking admin status for {user_email}: {e}")
+        # Fail closed — deny live mode if we can't verify
+        with _admin_cache_lock:
+            _admin_cache[user_email] = (now, False)
+        return False
+
+
+def _get_user_email(request: Request) -> str | None:
+    """Extract user email from Databricks App proxy headers or fallback."""
+    # Databricks Apps proxy passes user identity via these headers
+    email = request.headers.get("X-Forwarded-Email")
+    if email:
+        return email
+    email = request.headers.get("X-Forwarded-User")
+    if email:
+        return email
+    # Fallback: try to get from SDK (works when running as user, not SPN)
+    try:
+        w = _get_client()
+        me = w.current_user.me()
+        return me.user_name
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +207,16 @@ async def health_check():
 # API endpoints — async wrappers around synchronous SDK calls
 # ---------------------------------------------------------------------------
 
+@app.get("/api/user-info")
+async def api_user_info(request: Request):
+    """Return current user identity and admin status."""
+    email = _get_user_email(request)
+    if not email:
+        return {"email": None, "isAdmin": False}
+    is_admin = await asyncio.to_thread(_is_admin, email)
+    return {"email": email, "isAdmin": is_admin}
+
+
 @app.get("/api/catalogs")
 async def api_list_catalogs():
     try:
@@ -157,9 +239,15 @@ async def api_list_schemas(catalog: str = Query(...)):
 
 
 @app.get("/api/lineage")
-async def api_get_lineage(catalog: str = Query(...), schema: str = Query(...), live: bool = Query(False)):
+async def api_get_lineage(request: Request, catalog: str = Query(...), schema: str = Query(...), live: bool = Query(False)):
     catalog = _validate_identifier(catalog, "catalog")
     schema = _validate_identifier(schema, "schema")
+    # Only admins can bypass cache with live mode
+    if live:
+        email = _get_user_email(request)
+        if not email or not await asyncio.to_thread(_is_admin, email):
+            logger.info(f"Live mode denied for {email or 'unknown'} — not in {ADMIN_GROUP_NAME} group")
+            live = False
     try:
         if live:
             logger.info(f"LIVE MODE: Serving lineage for {catalog}.{schema} direct from system tables")
@@ -171,6 +259,7 @@ async def api_get_lineage(catalog: str = Query(...), schema: str = Query(...), l
 
 @app.get("/api/columns")
 async def api_get_columns(
+    request: Request,
     catalog: str = Query(...),
     schema: str = Query(...),
     table: str = Query(...),
@@ -180,6 +269,10 @@ async def api_get_columns(
     catalog = _validate_identifier(catalog, "catalog")
     schema = _validate_identifier(schema, "schema")
     table = _validate_identifier(table, "table")
+    if live:
+        email = _get_user_email(request)
+        if not email or not await asyncio.to_thread(_is_admin, email):
+            live = False
     try:
         cols = await asyncio.to_thread(get_columns, catalog, schema, table, live)
         return {"columns": cols}
@@ -190,6 +283,7 @@ async def api_get_columns(
 
 @app.get("/api/column-lineage")
 async def api_get_column_lineage(
+    request: Request,
     catalog: str = Query(...),
     schema: str = Query(...),
     table: str = Query(...),
@@ -200,6 +294,10 @@ async def api_get_column_lineage(
     schema = _validate_identifier(schema, "schema")
     table = _validate_identifier(table, "table")
     column = _validate_identifier(column, "column")
+    if live:
+        email = _get_user_email(request)
+        if not email or not await asyncio.to_thread(_is_admin, email):
+            live = False
     try:
         return await asyncio.to_thread(get_column_lineage, catalog, schema, table, column, live)
     except Exception as e:

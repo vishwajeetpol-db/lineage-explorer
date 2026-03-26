@@ -7,6 +7,7 @@ interface LineageState {
   schema: string;
   columnLineageEnabled: boolean;
   liveMode: boolean;
+  isAdmin: boolean;
 
   // Data
   catalogs: string[];
@@ -36,6 +37,7 @@ interface LineageState {
   setSchema: (schema: string) => void;
   setColumnLineageEnabled: (enabled: boolean) => void;
   setLiveMode: (live: boolean) => void;
+  setIsAdmin: (isAdmin: boolean) => void;
   setCatalogs: (catalogs: string[]) => void;
   setSchemas: (schemas: string[]) => void;
   setLineageData: (nodes: TableNode[], edges: LineageEdge[], cached?: boolean, cachedAt?: string | null, cacheExpiresAt?: string | null, fetchDurationMs?: number | null) => void;
@@ -56,6 +58,7 @@ export const useLineageStore = create<LineageState>((set) => ({
   schema: "",
   columnLineageEnabled: false,
   liveMode: false,
+  isAdmin: false,
   catalogs: [],
   schemas: [],
   nodes: [],
@@ -78,6 +81,7 @@ export const useLineageStore = create<LineageState>((set) => ({
   setSchema: (schema) => set({ schema, nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null, cached: false, cachedAt: null, cacheExpiresAt: null, fetchDurationMs: null }),
   setColumnLineageEnabled: (enabled) => set({ columnLineageEnabled: enabled, columnEdges: [], selectedColumn: null, expandedNodes: new Set() }),
   setLiveMode: (live) => set({ liveMode: live }),
+  setIsAdmin: (isAdmin) => set({ isAdmin }),
   setCatalogs: (catalogs) => set({ catalogs }),
   setSchemas: (schemas) => set({ schemas }),
   setLineageData: (nodes, edges, cached, cachedAt, cacheExpiresAt, fetchDurationMs) => set({ nodes, edges, loading: false, error: null, cached: cached ?? false, cachedAt: cachedAt ?? null, cacheExpiresAt: cacheExpiresAt ?? null, fetchDurationMs: fetchDurationMs ?? null }),

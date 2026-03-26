@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { GitBranch, Search, ChevronDown, Columns3, Zap, Info } from "lucide-react";
+import { GitBranch, Search, ChevronDown, Columns3, Zap, Info, Lock } from "lucide-react";
 import { useLineageStore } from "../../store/lineageStore";
 import { api, setLiveMode } from "../../api/client";
 
@@ -10,7 +10,7 @@ interface Props {
 
 function Toolbar({ onGenerate }: Props) {
   const {
-    catalog, schema, columnLineageEnabled, liveMode,
+    catalog, schema, columnLineageEnabled, liveMode, isAdmin,
     catalogs, schemas, loading, cached, cachedAt, cacheExpiresAt, fetchDurationMs,
     setCatalog, setSchema, setColumnLineageEnabled, setLiveMode: setStoreLiveMode,
     setCatalogs, setSchemas, setSearchOpen,
@@ -20,6 +20,10 @@ function Toolbar({ onGenerate }: Props) {
   const [toast, setToast] = useState<string | null>(null);
 
   const handleLiveModeToggle = useCallback(() => {
+    if (!isAdmin) {
+      setToast("Only workspace admins can enable live mode.");
+      return;
+    }
     const next = !liveMode;
     setStoreLiveMode(next);
     setLiveMode(next);
@@ -28,7 +32,7 @@ function Toolbar({ onGenerate }: Props) {
     } else {
       setToast("Live mode disabled — data will be served from cache for faster loading.");
     }
-  }, [liveMode, setStoreLiveMode]);
+  }, [liveMode, isAdmin, setStoreLiveMode]);
 
   // Auto-dismiss toast
   useEffect(() => {
@@ -128,13 +132,19 @@ function Toolbar({ onGenerate }: Props) {
       </div>
 
       {/* Live Query */}
-      <div className="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+      <div
+        className={`flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-white/[0.02] border border-white/[0.04] ${!isAdmin ? "opacity-50" : ""}`}
+        title={!isAdmin ? "Only workspace admins can enable live mode" : "Toggle live query mode"}
+      >
         <Zap size={13} className={liveMode ? "text-amber-400" : "text-slate-500"} />
         <span className="text-[11px] text-slate-500 font-medium">Live</span>
+        {!isAdmin && <Lock size={10} className="text-slate-600" />}
         <button
           onClick={handleLiveModeToggle}
+          disabled={!isAdmin}
           className={`
             relative w-8 h-[18px] rounded-full transition-all duration-300
+            ${!isAdmin ? "cursor-not-allowed" : ""}
             ${liveMode
               ? "bg-gradient-to-r from-amber-500 to-orange-500 shadow-[0_0_10px_rgba(245,158,11,0.3)]"
               : "bg-white/[0.06]"
@@ -227,10 +237,14 @@ function Toolbar({ onGenerate }: Props) {
             <Info size={10} className="text-slate-600 flex-shrink-0" />
             Cached{cachedAt ? ` · Refreshed ${formatTimeAgo(cachedAt)}` : ""}
             {cacheExpiresAt ? ` · Expires ${formatTimeUntil(cacheExpiresAt)}` : ""}
-            {" · "}
-            <button onClick={handleLiveModeToggle} className="underline underline-offset-2 hover:text-slate-400 transition-colors">
-              Enable live mode for latest data
-            </button>
+            {isAdmin && (
+              <>
+                {" · "}
+                <button onClick={handleLiveModeToggle} className="underline underline-offset-2 hover:text-slate-400 transition-colors">
+                  Enable live mode for latest data
+                </button>
+              </>
+            )}
           </>
         ) : (
           <>Loaded fresh from system tables{cacheExpiresAt ? ` · Cache expires ${formatTimeUntil(cacheExpiresAt)}` : ""}</>

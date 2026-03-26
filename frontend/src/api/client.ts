@@ -57,7 +57,14 @@ export interface ColumnLineageResponse {
   edges: ColumnLineageEdge[];
 }
 
+export interface UserInfo {
+  email: string | null;
+  isAdmin: boolean;
+}
+
 export const api = {
+  getUserInfo: () => fetchJson<UserInfo>(`${BASE}/user-info`),
+
   getCatalogs: () => fetchJson<{ catalogs: string[] }>(`${BASE}/catalogs`),
 
   getSchemas: (catalog: string) =>

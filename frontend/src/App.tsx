@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { ReactFlowProvider } from "reactflow";
 import Toolbar from "./components/layout/Toolbar";
 import LineageCanvas from "./components/graph/LineageCanvas";
@@ -7,6 +7,14 @@ import { api, setLiveMode } from "./api/client";
 
 export default function App() {
   const { catalog, schema, liveMode, setLineageData, setError } = useLineageStore();
+  const setIsAdmin = useLineageStore((s) => s.setIsAdmin);
+
+  // Fetch user info (admin status) on mount
+  useEffect(() => {
+    api.getUserInfo()
+      .then((info) => setIsAdmin(info.isAdmin))
+      .catch(() => setIsAdmin(false));
+  }, [setIsAdmin]);
 
   const handleGenerate = useCallback(async () => {
     if (!catalog || !schema) return;
