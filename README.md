@@ -374,6 +374,74 @@ Three deployment options exist. This repo is **Option 1 (Direct)**.
 | **Cache survives restart** | No | Yes | Yes |
 | **Monthly cost** | ~$55-65 | ~$60-77 | ~$95-117 |
 | **Best for** | Demos, low traffic | Medium traffic | Production, 4000+ users |
+| **Warehouse cost per user click** | $0 (served from cache) | $0 (served from cache) | $0 (served from cache) |
+| **Cost scales with users?** | No — fixed app compute | No — fixed app compute | No — fixed app compute |
+
+---
+
+## Cost Optimization & Sustainable Economics
+
+Lineage Explorer follows the **"Snapshot + Cached App" pattern** — the same architecture recommended for building Databricks Apps with import-mode-like economics. User clicks are effectively free from a warehouse-cost perspective.
+
+### How It Works
+
+| Phase | What Happens | Cost Impact |
+|-------|-------------|-------------|
+| **Cold cache miss** | One DBSQL query fires against `information_schema` + `system.access` | Single warehouse query (lightweight metadata, not raw data) |
+| **Warm cache hit** | Response served from in-memory TTL cache (default 8h) | $0 — no warehouse query |
+| **Concurrent requests** | Request coalescing: 4,000 users = 1 query, 3,999 wait <1ms | $0 additional — same single query |
+| **App restart (Lakebase)** | Cache served from PostgreSQL (30ms cold read) | $0 — warehouse stays off |
+
+The warehouse is **never hit per-click or per-user**. Cost is dominated by scheduled/periodic cache refreshes — exactly like Power BI import mode.
+
+### Controlling App & Warehouse Uptime
+
+Databricks Apps are billed **per hour of app compute** while running (Medium/Large size, fixed DBUs/hour). To minimize cost:
+
+**App runtime window:**
+- Run the app only during business hours (e.g., 08:00–18:00 M–F)
+- Stop the app outside hours to save ~14 hours/day of compute
+- With Lakebase, the persisted cache is available immediately on restart — no cold-start penalty
+
+**Warehouse window:**
+- Restrict the SQL warehouse to refresh/snapshot windows only
+- Outside these periods, keep the warehouse in auto-stop mode
+- The app continues serving from cache even when the warehouse is stopped
+
+**Example schedule:**
+```
+App:       08:00–18:00 M–F (50 hours/week)
+Warehouse: Auto-stop after 10 min idle (only wakes for cache refresh)
+Result:    ~$43-55/mo app compute + ~$12-22/mo warehouse = ~$55-77/mo total
+```
+
+### Budget Policies & Monitoring
+
+Track and cap Lineage Explorer costs using Databricks governance tools:
+
+**Track usage via system billing tables:**
+```sql
+-- App compute cost (APPS SKU)
+SELECT usage_date, SUM(usage_quantity) as app_dbus
+FROM system.billing.usage
+WHERE sku_name LIKE '%APPS%'
+  AND usage_metadata.app_name = 'lineage-explorer'
+GROUP BY usage_date;
+
+-- Warehouse cost (SQL SKU)
+SELECT usage_date, SUM(usage_quantity) as sql_dbus
+FROM system.billing.usage
+WHERE sku_name LIKE '%SQL%'
+  AND usage_metadata.warehouse_id = '<warehouse-id>'
+GROUP BY usage_date;
+```
+
+**Set guardrails:**
+- **Serverless budget policies** — Set spending caps on APPS and SQL SKUs
+- **Billing alerts** — Get notified if daily spend exceeds thresholds
+- **Limited SPN permissions** — App service principal only gets `USE CATALOG` + `BROWSE` + `USE SCHEMA` (no broad `SELECT` on raw data)
+- **Rate limiting** — 60 req/min/IP prevents runaway query patterns
+- **No `SELECT *` on raw tables** — All app queries target lightweight metadata tables only
 
 ---
 
@@ -392,42 +460,6 @@ Three deployment options exist. This repo is **Option 1 (Direct)**.
 | Blank white screen | Unhandled React error | Fixed — ErrorBoundary catches and shows recovery UI |
 | 429 Too Many Requests | Rate limit exceeded | Wait and retry, or increase via `RATE_LIMIT_MAX_REQUESTS` env var |
 | 400 "Invalid catalog" | Special chars in identifier | Use only alphanumeric + underscores |
-
----
-
-## SPN Deployment Test Report
-
-> **Tested**: 2026-03-24 | **Workspace**: `fevm-ws-us-e2-vish-aws-databricks-1.cloud.databricks.com`
-> **Test data**: 20-layer deep lineage chain (20 tables, 56 edges) in `stress_test` schema
-> **Method**: Deployed app via external SPN, tested all 5 API endpoints, documented every permission failure
-
-### Permission Gaps Found and Fixed
-
-| # | Missing Permission | Error Observed | Resolution |
-|---|-------------------|----------------|------------|
-| 1 | `USE CATALOG` on target catalog for deploying SPN | `INSUFFICIENT_PERMISSIONS: User does not have USE CATALOG` | `GRANT USE CATALOG ON CATALOG <cat> TO <spn>` |
-| 2 | `BROWSE` on target catalog for deploying SPN | Catalog silently missing from `catalogs.list()` | `GRANT BROWSE ON CATALOG <cat> TO <spn>` |
-| 3 | `USE SCHEMA` on target schema for deploying SPN | Schema absent from `schemas.list()` | `GRANT USE SCHEMA ON SCHEMA <cat>.<sch> TO <spn>` |
-| 4 | `CAN_USE` on SQL Warehouse for deploying SPN | Not documented in original README | Grant via Permissions API (PUT) using SPN `client_id` as `service_principal_name` |
-
-### Parameterization Bugs Found and Fixed
-
-| # | Bug | Fix Applied |
-|---|-----|-------------|
-| 1 | Hardcoded warehouse ID (`9711dcb3942dac99`) in `app.yaml` | Replaced with placeholder; DABs uses `${var.warehouse_id}` |
-| 2 | Hardcoded workspace hosts in `databricks.yml` | Removed; now uses `--profile` flag |
-| 3 | Dual config (`app.yaml` + `databricks.yml`) | `databricks.yml` is now the canonical config; `app.yaml` is fallback-only |
-| 4 | Hardcoded catalog/warehouse/profile in `create_stress_test.py` | Parameterized via env vars (matching `generate_stress_test.py` pattern) |
-| 5 | Stress test scripts deployed to app container | Added to `.databricksignore` |
-| 6 | Duplicate `requirements.txt` (root vs backend/) with different pinning | Removed `backend/requirements.txt`; root file is authoritative |
-| 7 | SQL timeout hardcoded at 50s | Configurable via `SQL_WAIT_TIMEOUT` env var |
-| 8 | Query history lookback hardcoded at 7 days | Configurable via `QUERY_HISTORY_DAYS` env var |
-| 9 | Query history limit hardcoded at 200 | Configurable via `QUERY_HISTORY_LIMIT` env var |
-| 10 | Rate limiting hardcoded at 60 req/min | Configurable via `RATE_LIMIT_MAX_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS` |
-
-### API Note: `wait_timeout` Max is 50s
-
-The Databricks SQL Statement Execution API enforces a hard limit: `wait_timeout` must be 0 (disable wait) or between 5-50 seconds. Values above 50s cause `BAD_REQUEST`. The `SQL_WAIT_TIMEOUT` env var defaults to `50s` (the maximum).
 
 ---
 
