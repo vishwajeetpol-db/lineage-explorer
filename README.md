@@ -191,7 +191,7 @@ The app **never crashes** regardless of privilege level — all optional queries
 │                         DATABRICKS APP                              │
 │                                                                     │
 │   ┌──────────────────────┐          ┌──────────────────────────┐    │
-│   │    FastAPI Backend    │          │     React Frontend       │    │
+│   │    FastAPI Backend   │          │     React Frontend       │    │
 │   │                      │  JSON    │                          │    │
 │   │  Endpoints:          │ ──────►  │  React Flow  (DAG)       │    │
 │   │    /api/lineage      │          │  ELK.js     (layout)     │    │
@@ -200,14 +200,14 @@ The app **never crashes** regardless of privilege level — all optional queries
 │   │    /api/schemas      │          │  Tailwind   (dark UI)    │    │
 │   │    /health           │          │                          │    │
 │   │                      │          │  Column lineage tracing  │    │
-│   │  Middleware:          │          │  ErrorBoundary (guard)   │    │
-│   │    Rate limiting      │          └──────────────────────────┘    │
-│   │    Input validation   │                                         │
-│   │    Error sanitization │                                         │
+│   │  Middleware:         │          │  ErrorBoundary (guard)   │    │
+│   │    Rate limiting     │          └──────────────────────────┘    │
+│   │    Input validation  │                                          │
+│   │    Error sanitization│                                          │
 │   └──────────┬───────────┘                                          │
 │              │                                                      │
-│              │  In-memory TTL cache (8h)                             │
-│              │  Request coalescing (single-flight)                   │
+│              │  In-memory TTL cache (8h)                            │
+│              │  Request coalescing (single-flight)                  │
 │              │                                                      │
 │              ▼                                                      │
 │   ┌──────────────────────┐                                          │
