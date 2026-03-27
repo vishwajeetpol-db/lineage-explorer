@@ -67,7 +67,9 @@ def _get_user_info(request: Request) -> tuple[str | None, bool]:
 
     try:
         host = _get_client().config.host
-        user_client = WorkspaceClient(host=host, token=user_token)
+        from databricks.sdk.core import Config as SdkConfig
+        user_cfg = SdkConfig(host=host, token=user_token, auth_type="pat")
+        user_client = WorkspaceClient(config=user_cfg)
         me = user_client.current_user.me()
         email = me.user_name
         # Check if user is in the admins group from their own profile
