@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from databricks.sdk import WorkspaceClient
 from backend.lineage_service import (
     list_catalogs,
     list_schemas,
@@ -33,6 +34,11 @@ ADMIN_GROUP_NAME = os.environ.get("ADMIN_GROUP_NAME", "admins")
 _admin_cache: dict[str, tuple[float, bool]] = {}
 _admin_cache_lock = threading.Lock()
 ADMIN_CACHE_TTL = 600  # 10 minutes
+
+# Cache token→email resolution to avoid repeated current_user.me() calls
+_token_email_cache: dict[str, tuple[float, str]] = {}
+_token_email_lock = threading.Lock()
+TOKEN_EMAIL_CACHE_TTL = 300  # 5 minutes
 
 
 def _is_admin(user_email: str) -> bool:
@@ -80,21 +86,43 @@ def _is_admin(user_email: str) -> bool:
 
 
 def _get_user_email(request: Request) -> str | None:
-    """Extract user email from Databricks App proxy headers or fallback."""
-    # Databricks Apps proxy passes user identity via these headers
-    email = request.headers.get("X-Forwarded-Email")
-    if email:
-        return email
-    email = request.headers.get("X-Forwarded-User")
-    if email:
-        return email
-    # Fallback: try to get from SDK (works when running as user, not SPN)
-    try:
-        w = _get_client()
-        me = w.current_user.me()
-        return me.user_name
-    except Exception:
-        return None
+    """Extract user email from Databricks App request.
+
+    In Databricks Apps, the proxy forwards the user's OAuth token in the
+    Authorization header. We use that token to resolve the actual user,
+    NOT the app SPN.
+    """
+    # Priority 1: User's OAuth token forwarded by Databricks Apps proxy
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        # Check token→email cache first
+        token_key = token[-16:]  # use last 16 chars as cache key (avoids storing full tokens)
+        now = time.time()
+        with _token_email_lock:
+            cached = _token_email_cache.get(token_key)
+            if cached and now - cached[0] < TOKEN_EMAIL_CACHE_TTL:
+                return cached[1]
+        try:
+            host = os.environ.get("DATABRICKS_HOST") or _get_client().config.host
+            user_client = WorkspaceClient(host=host, token=token)
+            me = user_client.current_user.me()
+            if me.user_name:
+                with _token_email_lock:
+                    _token_email_cache[token_key] = (now, me.user_name)
+                return me.user_name
+        except Exception as e:
+            logger.debug(f"Could not resolve user from Authorization token: {e}")
+
+    # Priority 2: Explicit proxy headers (some reverse proxy setups)
+    for header in ("X-Forwarded-Email", "X-Forwarded-User", "X-Forwarded-Preferred-Username"):
+        val = request.headers.get(header)
+        if val:
+            return val
+
+    # No user identity available — treat as anonymous
+    logger.warning("Could not determine user identity from request headers")
+    return None
 
 
 # ---------------------------------------------------------------------------
