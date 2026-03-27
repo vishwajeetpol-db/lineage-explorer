@@ -25,6 +25,7 @@ import time
 import logging
 import random
 import threading
+from collections import OrderedDict
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementState
 from backend.models import (
@@ -57,17 +58,18 @@ def _get_client() -> WorkspaceClient:
 # simultaneously on an empty cache, only ONE DBSQL query fires. The other
 # 3,999 requests wait on a threading.Event and receive the same result.
 # ---------------------------------------------------------------------------
-_cache: dict[str, tuple[float, object]] = {}
+_cache: OrderedDict[str, tuple[float, object]] = OrderedDict()
 _cache_lock = threading.Lock()
 _inflight: dict[str, threading.Event] = {}  # keys currently being fetched
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "28800"))  # default 8 hours
+CACHE_MAX_ENTRIES = int(os.environ.get("CACHE_MAX_ENTRIES", "500"))  # LRU eviction threshold
 SQL_WAIT_TIMEOUT = os.environ.get("SQL_WAIT_TIMEOUT", "50s")  # max 50s per Databricks API limit (0s or 5-50s)
 QUERY_HISTORY_DAYS = int(os.environ.get("QUERY_HISTORY_DAYS", "7"))  # lookback window for lineage inference
 QUERY_HISTORY_LIMIT = int(os.environ.get("QUERY_HISTORY_LIMIT", "200"))  # max query history rows to scan
 
 
 def _cache_get(key: str):
-    """Return cached value if present and not expired, else None."""
+    """Return cached value if present and not expired, else None. Promotes key for LRU."""
     with _cache_lock:
         entry = _cache.get(key)
         if entry is None:
@@ -76,6 +78,8 @@ def _cache_get(key: str):
         if time.time() - ts > CACHE_TTL_SECONDS:
             del _cache[key]
             return None
+        # LRU: move to end (most recently used)
+        _cache.move_to_end(key)
         return val
 
 
@@ -89,8 +93,15 @@ def _cache_get_ts(key: str) -> float | None:
 
 
 def _cache_set(key: str, val: object):
+    """Set a cache entry. Evicts least-recently-used entries if over CACHE_MAX_ENTRIES."""
     with _cache_lock:
+        if key in _cache:
+            _cache.move_to_end(key)
         _cache[key] = (time.time(), val)
+        # Evict LRU entries if cache is too large
+        while len(_cache) > CACHE_MAX_ENTRIES:
+            evicted_key, _ = _cache.popitem(last=False)
+            logger.info(f"Cache LRU eviction: {evicted_key} (size: {len(_cache)})")
 
 
 def _cache_acquire(key: str) -> bool:
