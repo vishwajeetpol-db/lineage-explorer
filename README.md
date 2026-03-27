@@ -10,7 +10,7 @@ Interactive data lineage visualization for Databricks Unity Catalog. Explore tab
 
 - **Table Lineage DAG** — Automatic left-to-right layout via ELK.js with animated edge routing
 - **Column-Level Lineage** — Expand nodes to see columns, click a column to trace its flow upstream/downstream
-- **Live Mode** — Toggle between cached data (instant) and live system table queries
+- **Live Mode (Admin-Only)** — Workspace admins can toggle between cached data (instant) and live system table queries. Non-admins see the toggle but cannot enable it — their requests always use the shared cache.
 - **Smart Lineage Inference** — When `system.access.table_lineage` is unavailable, lineage is inferred from view definitions, query history, naming conventions (`raw_*` -> `cleaned_*`), and column overlap heuristics
 - **Request Coalescing** — Single-flight pattern prevents thundering herd: 4,000 simultaneous requests generate only 1 DBSQL query
 - **Staggered Reveal Animation** — Nodes cascade left-to-right after layout, edges appear when both endpoints are visible
@@ -94,6 +94,42 @@ databricks apps get lineage-explorer-dev --profile <your-profile> -o json \
 ```
 
 Open the URL, select a catalog and schema, click "Generate Lineage".
+
+### Alternative: Fast Deploy via deploy.sh (~10 seconds)
+
+The `databricks bundle deploy` command can be slow because it syncs all project files (including frontend source, package-lock.json, and dev scripts) to the workspace. The `deploy.sh` script bypasses this by staging only the 10 runtime files the app actually needs (~2MB) and deploying directly via the Databricks Apps API.
+
+```bash
+./deploy.sh <profile> <warehouse-id> [app-name] [workspace-path]
+```
+
+**Examples:**
+```bash
+# Deploy to default app (lineage-explorer-direct)
+./deploy.sh fe-vm-vish-aws 9711dcb3942dac99
+
+# Deploy to a custom app name
+./deploy.sh my-profile abc123def456 my-lineage-app
+
+# Deploy to a specific workspace path
+./deploy.sh my-profile abc123def456 my-app /Workspace/Users/me@co.com/my-app
+```
+
+**What it does:**
+1. Creates a temp staging directory with only runtime files: `app.yaml`, `requirements.txt`, `backend/*.py`, `frontend/dist/*`
+2. Injects the warehouse ID into the staging copy of `app.yaml` (the repo file stays parameterized with `<your-warehouse-id>`)
+3. Uploads the 10 files via `databricks workspace import-dir`
+4. Deploys the app via `databricks apps deploy`
+
+**When to use `deploy.sh` vs `bundle deploy`:**
+
+| | `deploy.sh` | `bundle deploy` |
+|---|------------|----------------|
+| **Speed** | ~10 seconds | 1-5 minutes |
+| **Files uploaded** | 10 (runtime only) | 38+ (includes source, configs) |
+| **Size uploaded** | ~2MB | ~10MB+ |
+| **Manages app resource** | No (app must exist) | Yes (creates/updates app) |
+| **Best for** | Iterative development, quick fixes | First-time setup, CI/CD |
 
 ---
 
@@ -244,7 +280,9 @@ All configuration is via environment variables. When deploying via DABs, `DATABR
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATABRICKS_WAREHOUSE_ID` | (auto-detect) | **Required.** SQL warehouse ID for queries |
-| `CACHE_TTL_SECONDS` | `28800` (8h) | How long cached lineage data lives |
+| `CACHE_TTL_SECONDS` | `28800` (8h) | How long cached lineage data lives before expiry |
+| `CACHE_MAX_ENTRIES` | `500` | Maximum number of entries in the LRU cache. When exceeded, least-recently-used entries are evicted. At ~50-200KB per lineage graph, 500 entries uses ~25-100MB of the 6GB app runtime. Increase for workspaces with many catalogs/schemas; decrease to save memory. |
+| `ADMIN_GROUP_NAME` | `admins` | Workspace group whose members can enable live mode. The app reads group membership from the user's own token via `current_user.me()` — no SPN IAM permissions needed. |
 | `SQL_WAIT_TIMEOUT` | `50s` | SQL statement execution timeout (max 50s per API limit) |
 | `QUERY_HISTORY_DAYS` | `7` | How many days of query history to scan for lineage inference |
 | `QUERY_HISTORY_LIMIT` | `200` | Max query history rows to scan per schema |
@@ -283,9 +321,10 @@ cd frontend && npm install && npm run dev
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Health check — returns status and version |
+| `GET` | `/api/user-info` | Returns `{email, isAdmin}` for the current user (see [User Identity & Admin-Only Live Mode](#user-identity--admin-only-live-mode)) |
 | `GET` | `/api/catalogs` | List available catalogs |
 | `GET` | `/api/schemas?catalog=X` | List schemas in a catalog |
-| `GET` | `/api/lineage?catalog=X&schema=Y&live=false` | Get table lineage graph |
+| `GET` | `/api/lineage?catalog=X&schema=Y&live=false` | Get table lineage graph. `live=true` bypasses cache (admin-only — silently ignored for non-admins) |
 | `GET` | `/api/columns?catalog=X&schema=Y&table=Z` | Get columns for a table |
 | `GET` | `/api/column-lineage?catalog=X&schema=Y&table=Z&column=W` | Get column-level lineage |
 | `POST` | `/api/cache/invalidate` | Clear cache (localhost only) |
@@ -309,13 +348,83 @@ All identifier parameters are validated: alphanumeric + underscores, max 255 cha
 
 ---
 
+## User Identity & Admin-Only Live Mode
+
+The app identifies the current user and checks their admin status to control access to live mode (cache bypass). This uses the Databricks Apps on-behalf-of user authorization mechanism.
+
+### How It Works
+
+1. **User accesses the app** — The Databricks Apps proxy authenticates the user via OAuth and forwards their access token to the app in the `x-forwarded-access-token` HTTP header.
+
+2. **App resolves identity** — The backend calls `current_user.me()` using the user's own token (via a user-scoped `WorkspaceClient` with `auth_type="pat"` to avoid conflicting with the app SPN's OAuth credentials in the environment).
+
+3. **Admin check from user's profile** — The `current_user.me()` response includes the user's group memberships. The app checks if the configured admin group (default: `admins`) is in that list. No SPN IAM permissions needed — the user's own token has access to their own profile.
+
+4. **Cache by email** — Results are cached by email (not token) for 5 minutes, so token rotation doesn't cause redundant API calls. This follows the same pattern as the lineage cache (keyed by `catalog.schema`, shared across users).
+
+### Behavior by User Type
+
+| User Type | Live Toggle | Cold Cache | Warm Cache | Backend Enforcement |
+|-----------|------------|------------|------------|---------------------|
+| **Workspace admin** (in `admins` group) | Enabled — can toggle freely | Queries SQL, caches result | Instant from cache | `live=true` allowed |
+| **Non-admin** | Visible but locked (greyed out, lock icon, tooltip) | Queries SQL, caches result (same as admin) | Instant from cache | `live=true` silently downgraded to `live=false` |
+
+**Key point**: Non-admins still get data on a cold cache. The normal cache-fill flow queries SQL and stores the result — that path is untouched. Live mode only controls whether an admin can **force a cache bypass** to get fresh data from system tables.
+
+### Frontend Behavior
+
+- **Admin**: Live toggle is amber/orange, fully interactive. "Enable live mode for latest data" link appears in the cache status banner.
+- **Non-admin**: Live toggle is greyed out at 50% opacity with a lock icon. Tooltip says "Only workspace admins can enable live mode". Banner link is hidden. Clicking the disabled toggle shows a toast notification.
+
+### Prerequisites
+
+The app must have user authorization enabled with at least these OAuth scopes (configured in the Databricks Apps UI):
+
+| Scope | Purpose |
+|-------|---------|
+| `iam.current-user:read` | Read the user's identity and group memberships |
+| `iam.access-control:read` | Read access control information (default scope) |
+
+These are default scopes that Databricks Apps includes automatically.
+
+### Customizing the Admin Group
+
+To use a different group name (e.g., `lineage-admins`), set the `ADMIN_GROUP_NAME` environment variable:
+
+```yaml
+env:
+  - name: ADMIN_GROUP_NAME
+    value: "lineage-admins"
+```
+
+---
+
 ## Caching & Concurrency
 
-### Two-Layer Cache
-1. **In-memory TTL** (default 8h) — instant response for repeated requests
-2. **Request coalescing** — if N threads request the same uncached key, only 1 query fires; N-1 wait on a `threading.Event`
+### LRU Cache with TTL
 
-### Thundering Herd Protection
+The in-memory cache uses an **OrderedDict-based LRU (Least Recently Used)** strategy with TTL expiry:
+
+- **TTL**: Entries expire after `CACHE_TTL_SECONDS` (default 8 hours) regardless of access frequency
+- **LRU eviction**: When the cache exceeds `CACHE_MAX_ENTRIES` (default 500), the least-recently-accessed entry is evicted to make room
+- **Access promotion**: Every cache hit moves the entry to the most-recently-used position, keeping active catalogs/schemas warm
+
+This prevents unbounded memory growth on workspaces with hundreds of catalogs and thousands of schemas.
+
+### Cache Keys
+
+| Cache | Key Pattern | Example | Shared? |
+|-------|------------|---------|---------|
+| Lineage graph | `lineage:{catalog}.{schema}` | `lineage:my_catalog.silver` | Yes — all users share |
+| Columns | `columns:{catalog}.{schema}.{table}` | `columns:my_catalog.silver.orders` | Yes — all users share |
+| Schemas | `schemas:{catalog}` | `schemas:my_catalog` | Yes — all users share |
+| Catalogs | `catalogs` | `catalogs` | Yes — all users share |
+| User info | email (e.g., `user@company.com`) | `user@company.com` | No — per-user (5min TTL) |
+
+All data caches are shared across users — when any user (admin or not) triggers a cache fill for a catalog/schema, all subsequent users get the cached result instantly.
+
+### Request Coalescing (Thundering Herd Protection)
+
 When 4,000 users click "Generate Lineage" simultaneously on a cold cache:
 
 | Without Protection | With Coalescing (implemented) |
@@ -325,6 +434,17 @@ When 4,000 users click "Generate Lineage" simultaneously on a cold cache:
 | ~10-18s x 4,000 | ~10-18s total (leader) + <1ms (followers) |
 
 If the leader thread fails, waiters use **jittered backoff** (0-10s spread + random 50-500ms delay) to avoid stampeding.
+
+### Memory Sizing Guide
+
+| `CACHE_MAX_ENTRIES` | Estimated Memory | Covers |
+|---------------------|-----------------|--------|
+| 100 | ~5-20MB | Small workspace, few schemas |
+| 500 (default) | ~25-100MB | Medium workspace, ~100 schemas |
+| 2000 | ~100-400MB | Large workspace, hundreds of schemas |
+| 5000 | ~250MB-1GB | Very large workspace (consider Lakebase deployment) |
+
+The app runtime has 6GB RAM. At the default of 500 entries, cache uses at most ~100MB, leaving ample room for the Python process, FastAPI, and request handling.
 
 ---
 
@@ -346,7 +466,8 @@ All strategies are additive and deduplicated.
 ```
 lineage-explorer/
 ├── databricks.yml              # DABs config — THE canonical deployment config
-├── app.yaml                    # Fallback for manual deployment only
+├── app.yaml                    # App runtime config (warehouse_id parameterized)
+├── deploy.sh                   # Fast deploy script (~10s, runtime files only)
 ├── requirements.txt            # Python deps (pinned ranges)
 ├── .gitignore
 ├── .databricksignore           # Excludes dev files from app deployment
@@ -473,6 +594,10 @@ GROUP BY usage_date;
 | Blank white screen | Unhandled React error | Fixed — ErrorBoundary catches and shows recovery UI |
 | 429 Too Many Requests | Rate limit exceeded | Wait and retry, or increase via `RATE_LIMIT_MAX_REQUESTS` env var |
 | 400 "Invalid catalog" | Special chars in identifier | Use only alphanumeric + underscores |
+| Live toggle disabled for admin | `x-forwarded-access-token` header missing | Enable user authorization on the app in the Databricks Apps UI. Ensure `iam.current-user:read` scope is included. |
+| Live toggle disabled for admin | `more than one authorization method` in logs | Fixed in code — `auth_type="pat"` forces token-only auth on user-scoped client. If you see this, redeploy with latest code. |
+| Live toggle disabled for admin | Admin group name mismatch | Default group is `admins`. If your workspace uses a different group, set `ADMIN_GROUP_NAME` env var. |
+| `deploy.sh` fails "app not found" | App doesn't exist yet | Run `databricks bundle deploy` first to create the app resource, then use `deploy.sh` for subsequent deploys. |
 
 ---
 
