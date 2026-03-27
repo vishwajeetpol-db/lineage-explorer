@@ -28,98 +28,59 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Admin group check — cached per user to avoid repeated API calls
+# User identity + admin check — single API call using user's own token
+#
+# Per Databricks Apps docs, the proxy forwards the user's OAuth token via
+# the `x-forwarded-access-token` header. We call current_user.me() with
+# that token — the response includes the user's group memberships, so we
+# can check admin status without any extra API calls or SPN permissions.
+#
+# Ref: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/auth
 # ---------------------------------------------------------------------------
 ADMIN_GROUP_NAME = os.environ.get("ADMIN_GROUP_NAME", "admins")
-_admin_cache: dict[str, tuple[float, bool]] = {}
-_admin_cache_lock = threading.Lock()
-ADMIN_CACHE_TTL = 600  # 10 minutes
 
-# Cache token→email resolution to avoid repeated current_user.me() calls
-_token_email_cache: dict[str, tuple[float, str]] = {}
-_token_email_lock = threading.Lock()
-TOKEN_EMAIL_CACHE_TTL = 300  # 5 minutes
+# Cache: token_suffix → (timestamp, email, is_admin)
+_user_info_cache: dict[str, tuple[float, str, bool]] = {}
+_user_info_lock = threading.Lock()
+USER_INFO_CACHE_TTL = 300  # 5 minutes
 
 
-def _is_admin(user_email: str) -> bool:
-    """Check if a user belongs to the workspace admins group. Results cached 10min."""
-    now = time.time()
-    with _admin_cache_lock:
-        entry = _admin_cache.get(user_email)
-        if entry and now - entry[0] < ADMIN_CACHE_TTL:
-            return entry[1]
+def _get_user_info(request: Request) -> tuple[str | None, bool]:
+    """Return (email, is_admin) for the requesting user.
 
-    try:
-        w = _get_client()
-        # Get current user's groups by listing group membership
-        groups = list(w.groups.list(filter=f'displayName eq "{ADMIN_GROUP_NAME}"'))
-        if not groups:
-            logger.warning(f"Admin group '{ADMIN_GROUP_NAME}' not found in workspace")
-            with _admin_cache_lock:
-                _admin_cache[user_email] = (now, False)
-            return False
-
-        admin_group = groups[0]
-        is_member = False
-        if admin_group.members:
-            # Check if user email matches any member
-            member_ids = [m.display for m in admin_group.members if m.display]
-            is_member = user_email in member_ids
-            if not is_member:
-                # Also check by value (which may be user ID)
-                # Resolve user email to ID
-                users = list(w.users.list(filter=f'userName eq "{user_email}"'))
-                if users:
-                    user_id = users[0].id
-                    is_member = any(m.value == user_id for m in admin_group.members)
-
-        with _admin_cache_lock:
-            _admin_cache[user_email] = (now, is_member)
-        logger.info(f"Admin check for {user_email}: {is_member}")
-        return is_member
-    except Exception as e:
-        logger.error(f"Error checking admin status for {user_email}: {e}")
-        # Fail closed — deny live mode if we can't verify
-        with _admin_cache_lock:
-            _admin_cache[user_email] = (now, False)
-        return False
-
-
-def _get_user_email(request: Request) -> str | None:
-    """Extract user email from Databricks App request.
-
-    Per Databricks Apps docs, the proxy forwards the user's OAuth token
-    via the `x-forwarded-access-token` header. We use that token to create
-    a user-scoped WorkspaceClient and call current_user.me().
-
-    Ref: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/auth
+    Uses the user's own OAuth token to call current_user.me(). The response
+    includes group memberships — if 'admins' is in the list, they're an admin.
+    No SPN permissions needed beyond what the user already has.
     """
     user_token = request.headers.get("x-forwarded-access-token")
     if not user_token:
         logger.warning("No x-forwarded-access-token header — cannot identify user")
-        return None
+        return None, False
 
-    # Check token→email cache first
+    # Check cache
     token_key = user_token[-16:]
     now = time.time()
-    with _token_email_lock:
-        cached = _token_email_cache.get(token_key)
-        if cached and now - cached[0] < TOKEN_EMAIL_CACHE_TTL:
-            return cached[1]
+    with _user_info_lock:
+        cached = _user_info_cache.get(token_key)
+        if cached and now - cached[0] < USER_INFO_CACHE_TTL:
+            return cached[1], cached[2]
 
     try:
         host = _get_client().config.host
         user_client = WorkspaceClient(host=host, token=user_token)
         me = user_client.current_user.me()
-        if me.user_name:
-            with _token_email_lock:
-                _token_email_cache[token_key] = (now, me.user_name)
-            logger.info(f"Resolved user: {me.user_name}")
-            return me.user_name
+        email = me.user_name
+        # Check if user is in the admins group from their own profile
+        is_admin = False
+        if me.groups:
+            is_admin = any(g.display == ADMIN_GROUP_NAME for g in me.groups)
+        with _user_info_lock:
+            _user_info_cache[token_key] = (now, email, is_admin)
+        logger.info(f"User: {email}, admin: {is_admin}")
+        return email, is_admin
     except Exception as e:
         logger.error(f"Failed to resolve user from x-forwarded-access-token: {e}")
-
-    return None
+        return None, False
 
 
 # ---------------------------------------------------------------------------
@@ -235,10 +196,7 @@ async def health_check():
 @app.get("/api/user-info")
 async def api_user_info(request: Request):
     """Return current user identity and admin status."""
-    email = _get_user_email(request)
-    if not email:
-        return {"email": None, "isAdmin": False}
-    is_admin = await asyncio.to_thread(_is_admin, email)
+    email, is_admin = await asyncio.to_thread(_get_user_info, request)
     return {"email": email, "isAdmin": is_admin}
 
 
@@ -269,9 +227,8 @@ async def api_get_lineage(request: Request, catalog: str = Query(...), schema: s
     schema = _validate_identifier(schema, "schema")
     # Only admins can bypass cache with live mode
     if live:
-        email = _get_user_email(request)
-        if not email or not await asyncio.to_thread(_is_admin, email):
-            logger.info(f"Live mode denied for {email or 'unknown'} — not in {ADMIN_GROUP_NAME} group")
+        _, is_admin = await asyncio.to_thread(_get_user_info, request)
+        if not is_admin:
             live = False
     try:
         if live:
@@ -295,8 +252,8 @@ async def api_get_columns(
     schema = _validate_identifier(schema, "schema")
     table = _validate_identifier(table, "table")
     if live:
-        email = _get_user_email(request)
-        if not email or not await asyncio.to_thread(_is_admin, email):
+        _, is_admin = await asyncio.to_thread(_get_user_info, request)
+        if not is_admin:
             live = False
     try:
         cols = await asyncio.to_thread(get_columns, catalog, schema, table, live)
@@ -320,8 +277,8 @@ async def api_get_column_lineage(
     table = _validate_identifier(table, "table")
     column = _validate_identifier(column, "column")
     if live:
-        email = _get_user_email(request)
-        if not email or not await asyncio.to_thread(_is_admin, email):
+        _, is_admin = await asyncio.to_thread(_get_user_info, request)
+        if not is_admin:
             live = False
     try:
         return await asyncio.to_thread(get_column_lineage, catalog, schema, table, column, live)
