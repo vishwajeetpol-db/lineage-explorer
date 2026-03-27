@@ -12,4 +12,4 @@ command:
   - 8000
 env:
   - name: DATABRICKS_WAREHOUSE_ID
-    value: "9711dcb3942dac99"
+    value: "<your-warehouse-id>"
