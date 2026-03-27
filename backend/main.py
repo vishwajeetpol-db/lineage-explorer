@@ -39,8 +39,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 ADMIN_GROUP_NAME = os.environ.get("ADMIN_GROUP_NAME", "admins")
 
-# Cache: token_suffix → (timestamp, email, is_admin)
-_user_info_cache: dict[str, tuple[float, str, bool]] = {}
+# Cache: email → (timestamp, is_admin)
+_user_info_cache: dict[str, tuple[float, bool]] = {}
 _user_info_lock = threading.Lock()
 USER_INFO_CACHE_TTL = 300  # 5 minutes
 
@@ -51,19 +51,14 @@ def _get_user_info(request: Request) -> tuple[str | None, bool]:
     Uses the user's own OAuth token to call current_user.me(). The response
     includes group memberships — if 'admins' is in the list, they're an admin.
     No SPN permissions needed beyond what the user already has.
+
+    Cache is keyed by email (not token), so token rotation doesn't cause
+    unnecessary API calls — same pattern as the lineage cache.
     """
     user_token = request.headers.get("x-forwarded-access-token")
     if not user_token:
         logger.warning("No x-forwarded-access-token header — cannot identify user")
         return None, False
-
-    # Check cache
-    token_key = user_token[-16:]
-    now = time.time()
-    with _user_info_lock:
-        cached = _user_info_cache.get(token_key)
-        if cached and now - cached[0] < USER_INFO_CACHE_TTL:
-            return cached[1], cached[2]
 
     try:
         host = _get_client().config.host
@@ -72,12 +67,21 @@ def _get_user_info(request: Request) -> tuple[str | None, bool]:
         user_client = WorkspaceClient(config=user_cfg)
         me = user_client.current_user.me()
         email = me.user_name
-        # Check if user is in the admins group from their own profile
+
+        # Check email-keyed cache first
+        now = time.time()
+        with _user_info_lock:
+            cached = _user_info_cache.get(email)
+            if cached and now - cached[0] < USER_INFO_CACHE_TTL:
+                return email, cached[1]
+
+        # Resolve admin status from group memberships
         is_admin = False
         if me.groups:
             is_admin = any(g.display == ADMIN_GROUP_NAME for g in me.groups)
+
         with _user_info_lock:
-            _user_info_cache[token_key] = (now, email, is_admin)
+            _user_info_cache[email] = (now, is_admin)
         logger.info(f"User: {email}, admin: {is_admin}")
         return email, is_admin
     except Exception as e:
