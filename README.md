@@ -41,15 +41,15 @@ cd lineage-explorer
 
 ### Step 2: Create a CLI Profile for Your Workspace
 
-A CLI profile stores your workspace URL and authentication so you don't have to provide them on every command. Run the interactive login:
+A CLI profile stores your workspace URL and authentication in `~/.databrickscfg` so you don't have to provide them on every command.
+
+**Option A: Human user (interactive OAuth)**
 
 ```bash
 databricks auth login --profile <your-profile-name>
 ```
 
-When prompted, enter your workspace URL (e.g., `https://my-workspace.cloud.databricks.com`). A browser window will open for OAuth authentication — click "Allow" to complete the flow.
-
-This creates an entry in `~/.databrickscfg`:
+When prompted, enter your workspace URL (e.g., `https://my-workspace.cloud.databricks.com`). A browser window will open for OAuth — click "Allow". This creates:
 
 ```ini
 [my-workspace]
@@ -57,13 +57,27 @@ host      = https://my-workspace.cloud.databricks.com
 auth_type = databricks-cli
 ```
 
-Verify it works:
+Token refreshes automatically. One-time setup per workspace.
+
+**Option B: Service principal (CI/CD, automation)**
+
+Create the profile manually in `~/.databrickscfg`:
+
+```ini
+[my-spn-profile]
+host          = https://my-workspace.cloud.databricks.com
+client_id     = <spn-client-id>
+client_secret = <spn-secret>
+auth_type     = oauth-m2m
+```
+
+The SPN must exist in the workspace and have permissions to create apps (see [Deploying via CI/CD](#deploying-via-cicd-service-principal) for required grants).
+
+**Verify either option:**
 
 ```bash
 databricks workspace list / --profile <your-profile-name>
 ```
-
-You only need to do this once per workspace. The token refreshes automatically on subsequent CLI commands.
 
 ### Step 3: Deploy via DABs (One Command)
 
