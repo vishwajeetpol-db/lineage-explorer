@@ -39,7 +39,33 @@ git clone <repo-url>
 cd lineage-explorer
 ```
 
-### Step 2: Deploy via DABs (One Command)
+### Step 2: Create a CLI Profile for Your Workspace
+
+A CLI profile stores your workspace URL and authentication so you don't have to provide them on every command. Run the interactive login:
+
+```bash
+databricks auth login --profile <your-profile-name>
+```
+
+When prompted, enter your workspace URL (e.g., `https://my-workspace.cloud.databricks.com`). A browser window will open for OAuth authentication — click "Allow" to complete the flow.
+
+This creates an entry in `~/.databrickscfg`:
+
+```ini
+[my-workspace]
+host      = https://my-workspace.cloud.databricks.com
+auth_type = databricks-cli
+```
+
+Verify it works:
+
+```bash
+databricks workspace list / --profile <your-profile-name>
+```
+
+You only need to do this once per workspace. The token refreshes automatically on subsequent CLI commands.
+
+### Step 3: Deploy via DABs (One Command)
 
 ```bash
 databricks bundle deploy -t dev \
@@ -54,7 +80,7 @@ databricks bundle run lineage-explorer -t dev --profile <your-workspace-profile>
 
 No files to edit. The `--profile` flag selects the workspace from `~/.databrickscfg`, and `--var` provides the warehouse ID.
 
-### Step 3: Grant Permissions to the App's SPN
+### Step 4: Grant Permissions to the App's SPN
 
 After deployment, Databricks auto-creates a service principal for the app. Grant it access:
 
@@ -85,7 +111,7 @@ curl -X PUT "https://<workspace-host>/api/2.0/permissions/sql/warehouses/<wareho
 
 Or via UI: **SQL Warehouses > Your Warehouse > Permissions > Add the app SPN with "Can Use"**
 
-### Step 4: Verify
+### Step 5: Verify
 
 ```bash
 # Get app URL
