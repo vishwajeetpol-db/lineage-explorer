@@ -88,40 +88,37 @@ def _is_admin(user_email: str) -> bool:
 def _get_user_email(request: Request) -> str | None:
     """Extract user email from Databricks App request.
 
-    In Databricks Apps, the proxy forwards the user's OAuth token in the
-    Authorization header. We use that token to resolve the actual user,
-    NOT the app SPN.
+    Per Databricks Apps docs, the proxy forwards the user's OAuth token
+    via the `x-forwarded-access-token` header. We use that token to create
+    a user-scoped WorkspaceClient and call current_user.me().
+
+    Ref: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/auth
     """
-    # Priority 1: User's OAuth token forwarded by Databricks Apps proxy
-    auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-        # Check token→email cache first
-        token_key = token[-16:]  # use last 16 chars as cache key (avoids storing full tokens)
-        now = time.time()
-        with _token_email_lock:
-            cached = _token_email_cache.get(token_key)
-            if cached and now - cached[0] < TOKEN_EMAIL_CACHE_TTL:
-                return cached[1]
-        try:
-            host = os.environ.get("DATABRICKS_HOST") or _get_client().config.host
-            user_client = WorkspaceClient(host=host, token=token)
-            me = user_client.current_user.me()
-            if me.user_name:
-                with _token_email_lock:
-                    _token_email_cache[token_key] = (now, me.user_name)
-                return me.user_name
-        except Exception as e:
-            logger.debug(f"Could not resolve user from Authorization token: {e}")
+    user_token = request.headers.get("x-forwarded-access-token")
+    if not user_token:
+        logger.warning("No x-forwarded-access-token header — cannot identify user")
+        return None
 
-    # Priority 2: Explicit proxy headers (some reverse proxy setups)
-    for header in ("X-Forwarded-Email", "X-Forwarded-User", "X-Forwarded-Preferred-Username"):
-        val = request.headers.get(header)
-        if val:
-            return val
+    # Check token→email cache first
+    token_key = user_token[-16:]
+    now = time.time()
+    with _token_email_lock:
+        cached = _token_email_cache.get(token_key)
+        if cached and now - cached[0] < TOKEN_EMAIL_CACHE_TTL:
+            return cached[1]
 
-    # No user identity available — treat as anonymous
-    logger.warning("Could not determine user identity from request headers")
+    try:
+        host = _get_client().config.host
+        user_client = WorkspaceClient(host=host, token=user_token)
+        me = user_client.current_user.me()
+        if me.user_name:
+            with _token_email_lock:
+                _token_email_cache[token_key] = (now, me.user_name)
+            logger.info(f"Resolved user: {me.user_name}")
+            return me.user_name
+    except Exception as e:
+        logger.error(f"Failed to resolve user from x-forwarded-access-token: {e}")
+
     return None
 
 
