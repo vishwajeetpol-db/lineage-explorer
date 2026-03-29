@@ -149,26 +149,24 @@ Open the URL, select a catalog and schema, click "Generate Lineage".
 The `databricks bundle deploy` command can be slow because it syncs all project files (including frontend source, package-lock.json, and dev scripts) to the workspace. The `deploy.sh` script bypasses this by staging only the 10 runtime files the app actually needs (~2MB) and deploying directly via the Databricks Apps API.
 
 ```bash
-./deploy.sh <profile> <warehouse-id> [app-name] [workspace-path]
+./deploy.sh <profile> <warehouse-id> [app-name]
 ```
 
 **Examples:**
 ```bash
-# Deploy to default app (lineage-explorer-direct)
-./deploy.sh fe-vm-vish-aws 9711dcb3942dac99
+# Deploy with default app name (lineage-explorer)
+./deploy.sh my-profile abc123def456
 
-# Deploy to a custom app name
+# Deploy with a custom app name
 ./deploy.sh my-profile abc123def456 my-lineage-app
-
-# Deploy to a specific workspace path
-./deploy.sh my-profile abc123def456 my-app /Workspace/Users/me@co.com/my-app
 ```
 
 **What it does:**
-1. Creates a temp staging directory with only runtime files: `app.yaml`, `requirements.txt`, `backend/*.py`, `frontend/dist/*`
-2. Injects the warehouse ID into the staging copy of `app.yaml` (the repo file stays parameterized with `<your-warehouse-id>`)
-3. Uploads the 10 files via `databricks workspace import-dir`
-4. Deploys the app via `databricks apps deploy`
+1. Auto-resolves the deploying user's workspace path from the CLI profile (no hardcoded paths)
+2. Creates a temp staging directory with only runtime files: `app.yaml`, `requirements.txt`, `backend/*.py`, `frontend/dist/*`
+3. Injects the warehouse ID into the staging copy of `app.yaml` (the repo file stays parameterized with `<your-warehouse-id>`)
+4. Uploads the 10 files via `databricks workspace import-dir`
+5. Deploys the app via `databricks apps deploy`
 
 **When to use `deploy.sh` vs `bundle deploy`:**
 
@@ -177,7 +175,8 @@ The `databricks bundle deploy` command can be slow because it syncs all project 
 | **Speed** | ~10 seconds | 1-5 minutes |
 | **Files uploaded** | 10 (runtime only) | 38+ (includes source, configs) |
 | **Size uploaded** | ~2MB | ~10MB+ |
-| **Manages app resource** | No (app must exist) | Yes (creates/updates app) |
+| **Manages app resource** | No (app must already exist) | Yes (creates/updates app) |
+| **Workspace path** | Auto-resolved from CLI profile | Configured in `databricks.yml` |
 | **Best for** | Iterative development, quick fixes | First-time setup, CI/CD |
 
 ---
