@@ -30,6 +30,7 @@ export interface TableNode {
   updated_at: string | null;
   upstream_count: number;
   downstream_count: number;
+  lineage_status: "connected" | "root" | "leaf" | "orphan";
 }
 
 export interface LineageEdge {

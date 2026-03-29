@@ -1,6 +1,6 @@
 import { memo } from "react";
 import { motion } from "framer-motion";
-import { User, Database, Columns3, Calendar, ArrowUpRight, ArrowDownRight, Eye, Layers } from "lucide-react";
+import { User, Database, Columns3, Calendar, ArrowUpRight, ArrowDownRight, Eye, Layers, AlertCircle, CircleDot, ArrowRightFromLine, ArrowRightToLine } from "lucide-react";
 import type { TableNode } from "../../api/client";
 
 interface Props {
@@ -79,6 +79,16 @@ function TableTooltip({ node, position }: Props) {
             count={node.downstream_count}
           />
         </div>
+
+        {/* Lineage status */}
+        {node.lineage_status && node.lineage_status !== "connected" && (
+          <>
+            <div className="mx-4 h-px bg-gradient-to-r from-transparent via-white/[0.06] to-transparent" />
+            <div className="px-4 py-2.5">
+              <LineageStatusBadge status={node.lineage_status} />
+            </div>
+          </>
+        )}
       </div>
     </motion.div>
   );
@@ -105,6 +115,52 @@ function CountBadge({ icon, label, count }: { icon: React.ReactNode; label: stri
       {icon}
       <span className="text-slate-500">{label}</span>
       <span className="text-slate-200 font-semibold ml-0.5">{count}</span>
+    </div>
+  );
+}
+
+const lineageStatusConfig: Record<string, { icon: typeof AlertCircle; color: string; bg: string; message: string; link?: string }> = {
+  orphan: {
+    icon: AlertCircle,
+    color: "text-amber-400",
+    bg: "bg-amber-500/10",
+    message: "No lineage recorded. No tracked query has read from or written to this table.",
+    link: "https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-lineage",
+  },
+  root: {
+    icon: ArrowRightFromLine,
+    color: "text-emerald-400",
+    bg: "bg-emerald-500/10",
+    message: "Source table \u2014 no upstream dependencies.",
+  },
+  leaf: {
+    icon: ArrowRightToLine,
+    color: "text-blue-400",
+    bg: "bg-blue-500/10",
+    message: "Sink table \u2014 no downstream consumers.",
+  },
+};
+
+function LineageStatusBadge({ status }: { status: string }) {
+  const config = lineageStatusConfig[status];
+  if (!config) return null;
+  const Icon = config.icon;
+  return (
+    <div className={`flex items-start gap-2 rounded-lg px-3 py-2 ${config.bg}`}>
+      <Icon size={13} className={`${config.color} flex-shrink-0 mt-0.5`} />
+      <div className="flex flex-col gap-1">
+        <span className={`text-[11px] leading-relaxed ${config.color}`}>{config.message}</span>
+        {config.link && (
+          <a
+            href={config.link}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[10px] text-slate-500 underline underline-offset-2 hover:text-slate-400 pointer-events-auto"
+          >
+            UC lineage limitations
+          </a>
+        )}
+      </div>
     </div>
   );
 }

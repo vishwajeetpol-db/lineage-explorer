@@ -21,6 +21,7 @@ function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded
   const isSelected = data.isSelected;
   const isDimmed = data.isDimmed;
   const isRevealed = data.isRevealed ?? true;
+  const isOrphan = data.lineage_status === "orphan";
 
   const handleNodeClick = useCallback(() => {
     if (columnLineageEnabled) {
@@ -54,7 +55,9 @@ function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded
         relative rounded-2xl border transition-all duration-300
         ${isSelected
           ? "border-accent/60 shadow-[0_0_0_1px_rgba(99,102,241,0.3),0_0_30px_rgba(99,102,241,0.15),0_8px_32px_rgba(0,0,0,0.5)]"
-          : "border-white/[0.06] hover:border-white/[0.12] shadow-[0_4px_24px_rgba(0,0,0,0.4)] hover:shadow-[0_8px_40px_rgba(0,0,0,0.5)]"
+          : isOrphan
+            ? "border-amber-500/30 shadow-[0_4px_24px_rgba(0,0,0,0.4)] hover:border-amber-500/50"
+            : "border-white/[0.06] hover:border-white/[0.12] shadow-[0_4px_24px_rgba(0,0,0,0.4)] hover:shadow-[0_8px_40px_rgba(0,0,0,0.5)]"
         }
         ${isDimmed ? "pointer-events-none" : "cursor-pointer"}
         bg-gradient-to-b from-[#161625] to-[#12121E]

@@ -359,10 +359,18 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
             downstream_count[src] = downstream_count.get(src, 0) + 1
             upstream_count[tgt] = upstream_count.get(tgt, 0) + 1
 
-    # Update counts on nodes
+    # Update counts and lineage status on nodes
     for node_id, node in nodes_map.items():
         node.upstream_count = upstream_count.get(node_id, 0)
         node.downstream_count = downstream_count.get(node_id, 0)
+        if node.upstream_count == 0 and node.downstream_count == 0:
+            node.lineage_status = "orphan"
+        elif node.upstream_count == 0:
+            node.lineage_status = "root"
+        elif node.downstream_count == 0:
+            node.lineage_status = "leaf"
+        else:
+            node.lineage_status = "connected"
 
     result = LineageResponse(
         nodes=list(nodes_map.values()),
