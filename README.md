@@ -12,8 +12,10 @@ Interactive data lineage visualization for Databricks Unity Catalog. Explore tab
 - **Column-Level Lineage** — Expand nodes to see columns, click a column to trace its flow upstream/downstream
 - **Live Mode (Admin-Only)** — Workspace admins can toggle between cached data (instant) and live system table queries. Non-admins see the toggle but cannot enable it — their requests always use the shared cache.
 - **System Table Lineage** — Table and column lineage sourced exclusively from `system.access.table_lineage` and `system.access.column_lineage` — the Unity Catalog source of truth. No inference, no heuristics, no false positives.
+- **Lineage Status Indicators** — Each node is classified as connected, root (source), leaf (sink), or orphan (no lineage). Orphan nodes get an amber border and a tooltip explaining the status. A banner at the top shows the count of orphan tables with a link to UC lineage limitations.
 - **Request Coalescing** — Single-flight pattern prevents thundering herd: 4,000 simultaneous requests generate only 1 DBSQL query
 - **Staggered Reveal Animation** — Nodes cascade left-to-right after layout, edges appear when both endpoints are visible
+- **Orphan Node Layout** — Tables with no lineage are laid out in a separate section below the DAG, spaced by name length to avoid overlap
 - **Search** — Cmd+K to search tables/views
 - **Interactive** — Drag nodes, zoom/pan, hover tooltips, node highlighting with upstream/downstream paths
 - **Reset Layout** — Re-run ELK and replay reveal animation after dragging nodes
@@ -489,6 +491,19 @@ Unity Catalog automatically records lineage when queries like the following are 
 | `INSERT INTO ... SELECT` | `INSERT INTO silver.cleaned SELECT ... FROM bronze.raw` | `bronze.raw` → `silver.cleaned` |
 | `MERGE INTO` | `MERGE INTO target USING source ON ...` | `source` → `target` |
 | `CREATE VIEW` | `CREATE VIEW vw AS SELECT ... FROM t1 JOIN t2` | `t1` → `vw`, `t2` → `vw` |
+
+### Node Status Classification
+
+Every table in the graph is classified based on its presence in the lineage system tables:
+
+| Status | Visual | Meaning |
+|--------|--------|---------|
+| **Connected** | Default border | Has both upstream and downstream lineage |
+| **Root** | Default border | Source/ingestion table — feeds downstream tables but nothing feeds it |
+| **Leaf** | Default border | Sink/reporting table — receives data but nothing reads from it |
+| **Orphan** | Amber border | No lineage recorded — no tracked query has read from or written to this table |
+
+Orphan nodes are laid out in a separate section below the main DAG. When orphans exist, a banner appears at the top with the count and a link to the UC lineage limitations documentation.
 
 If a table has no lineage in the graph, it means no tracked query has written to or read from it yet. Run a query against it and lineage will appear on the next refresh.
 
