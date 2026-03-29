@@ -19,20 +19,25 @@ export async function layoutGraph(
   edges: Edge[],
   expandedNodes: Set<string>
 ): Promise<LayoutResult> {
-  const elkNodes = nodes.map((node) => {
+  // Separate connected nodes from orphans (no edges at all)
+  const connectedIds = new Set<string>();
+  for (const edge of edges) {
+    connectedIds.add(edge.source);
+    connectedIds.add(edge.target);
+  }
+
+  const connectedNodes = nodes.filter((n) => connectedIds.has(n.id));
+  const orphanNodes = nodes.filter((n) => !connectedIds.has(n.id));
+
+  function toElkNode(node: Node) {
     const isExpanded = expandedNodes.has(node.id);
     const columnCount = node.data?.columns?.length || 0;
     const width = isExpanded ? EXPANDED_WIDTH : COMPACT_WIDTH;
     const height = isExpanded
       ? EXPANDED_BASE_HEIGHT + columnCount * COLUMN_ROW_HEIGHT + 12
       : COMPACT_HEIGHT;
-
-    return {
-      id: node.id,
-      width,
-      height,
-    };
-  });
+    return { id: node.id, width, height };
+  }
 
   const elkEdges = edges.map((edge, i) => ({
     id: edge.id || `e-${i}`,
@@ -40,6 +45,7 @@ export async function layoutGraph(
     targets: [edge.target],
   }));
 
+  // Layout connected nodes with ELK
   const graph = await elk.layout({
     id: "root",
     layoutOptions: {
@@ -57,18 +63,45 @@ export async function layoutGraph(
       "elk.layered.spacing.edgeNodeBetweenLayers": "30",
       "elk.edgeRouting": "SPLINES",
     },
-    children: elkNodes,
+    children: connectedNodes.map(toElkNode),
     edges: elkEdges,
   });
 
+  // Find the bottom of the connected graph
+  let graphBottom = 0;
+  let graphLeft = 60;
+  for (const child of graph.children || []) {
+    const bottom = (child.y || 0) + (child.height || COMPACT_HEIGHT);
+    if (bottom > graphBottom) graphBottom = bottom;
+  }
+
+  // Position orphan nodes in a grid below the main graph
+  const ORPHAN_GAP_Y = 80; // gap between connected graph and orphan section
+  const ORPHAN_SPACING_X = 40;
+  const ORPHAN_SPACING_Y = 30;
+  const ORPHAN_COLS = 3;
+  const orphanStartY = connectedNodes.length > 0 ? graphBottom + ORPHAN_GAP_Y : 60;
+
+  const orphanPositions = new Map<string, { x: number; y: number }>();
+  orphanNodes.forEach((node, i) => {
+    const col = i % ORPHAN_COLS;
+    const row = Math.floor(i / ORPHAN_COLS);
+    orphanPositions.set(node.id, {
+      x: graphLeft + col * (COMPACT_WIDTH + ORPHAN_SPACING_X),
+      y: orphanStartY + row * (COMPACT_HEIGHT + ORPHAN_SPACING_Y),
+    });
+  });
+
+  // Merge positions
   const positionedNodes = nodes.map((node) => {
     const elkNode = graph.children?.find((n) => n.id === node.id);
+    const orphanPos = orphanPositions.get(node.id);
 
     return {
       ...node,
       position: {
-        x: elkNode?.x || 0,
-        y: elkNode?.y || 0,
+        x: elkNode?.x || orphanPos?.x || 0,
+        y: elkNode?.y || orphanPos?.y || 0,
       },
     };
   });
