@@ -14,6 +14,7 @@ class TableNode(BaseModel):
     updated_at: Optional[str] = None
     upstream_count: int = 0
     downstream_count: int = 0
+    lineage_status: str = "connected"  # connected | root | leaf | orphan
 
 
 class LineageEdge(BaseModel):
