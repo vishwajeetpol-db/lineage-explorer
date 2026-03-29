@@ -1,6 +1,6 @@
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { GitBranch, Search, ChevronDown, Columns3, Zap, Info, Lock } from "lucide-react";
+import { GitBranch, Search, ChevronDown, Columns3, Zap, Info, Lock, AlertTriangle } from "lucide-react";
 import { useLineageStore } from "../../store/lineageStore";
 import { api, setLiveMode } from "../../api/client";
 
@@ -18,6 +18,7 @@ function Toolbar({ onGenerate }: Props) {
 
   const nodes = useLineageStore((s) => s.nodes);
   const [toast, setToast] = useState<string | null>(null);
+  const orphanCount = useMemo(() => nodes.filter((n) => n.lineage_status === "orphan").length, [nodes]);
 
   const handleLiveModeToggle = useCallback(() => {
     if (!isAdmin) {
@@ -249,6 +250,23 @@ function Toolbar({ onGenerate }: Props) {
         ) : (
           <>Loaded fresh from system tables{cacheExpiresAt ? ` · Cache expires ${formatTimeUntil(cacheExpiresAt)}` : ""}</>
         )}
+      </div>
+    )}
+
+    {/* Orphan tables banner */}
+    {orphanCount > 0 && (
+      <div className="flex items-center justify-center gap-2 px-4 py-1 text-[10px] font-medium tracking-wide bg-amber-500/5 text-amber-400/80 border-b border-amber-500/10">
+        <AlertTriangle size={10} className="flex-shrink-0" />
+        {orphanCount} {orphanCount === 1 ? "table has" : "tables have"} no lineage recorded — no tracked query has read from or written to {orphanCount === 1 ? "it" : "them"}.
+        {" "}
+        <a
+          href="https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-lineage"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline underline-offset-2 hover:text-amber-300 transition-colors"
+        >
+          UC lineage limitations
+        </a>
       </div>
     )}
 

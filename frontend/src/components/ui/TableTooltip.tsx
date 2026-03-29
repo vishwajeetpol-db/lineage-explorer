@@ -125,7 +125,6 @@ const lineageStatusConfig: Record<string, { icon: typeof AlertCircle; color: str
     color: "text-amber-400",
     bg: "bg-amber-500/10",
     message: "No lineage recorded. No tracked query has read from or written to this table.",
-    link: "https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-lineage",
   },
   root: {
     icon: ArrowRightFromLine,
