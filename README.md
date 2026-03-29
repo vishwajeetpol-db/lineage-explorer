@@ -11,7 +11,7 @@ Interactive data lineage visualization for Databricks Unity Catalog. Explore tab
 - **Table Lineage DAG** — Automatic left-to-right layout via ELK.js with animated edge routing
 - **Column-Level Lineage** — Expand nodes to see columns, click a column to trace its flow upstream/downstream
 - **Live Mode (Admin-Only)** — Workspace admins can toggle between cached data (instant) and live system table queries. Non-admins see the toggle but cannot enable it — their requests always use the shared cache.
-- **Smart Lineage Inference** — When `system.access.table_lineage` is unavailable, lineage is inferred from view definitions, query history, naming conventions (`raw_*` -> `cleaned_*`), and column overlap heuristics
+- **System Table Lineage** — Table and column lineage sourced exclusively from `system.access.table_lineage` and `system.access.column_lineage` — the Unity Catalog source of truth. No inference, no heuristics, no false positives.
 - **Request Coalescing** — Single-flight pattern prevents thundering herd: 4,000 simultaneous requests generate only 1 DBSQL query
 - **Staggered Reveal Animation** — Nodes cascade left-to-right after layout, edges appear when both endpoints are visible
 - **Search** — Cmd+K to search tables/views
@@ -105,13 +105,20 @@ APP_SPN=$(databricks apps get lineage-explorer-dev --profile <your-profile> -o j
 echo "App SPN: $APP_SPN"
 ```
 
-**Required grants** (minimum for the app to function):
+**Required grants** (all required for the app to function):
 
 ```sql
 -- Replace <catalog>, <schema>, and <app-spn> with actual values
+
+-- Target catalog/schema access
 GRANT USE CATALOG ON CATALOG <catalog> TO `<app-spn>`;
 GRANT BROWSE ON CATALOG <catalog> TO `<app-spn>`;
 GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO `<app-spn>`;
+
+-- System tables access (required for lineage data)
+GRANT USE CATALOG ON CATALOG system TO `<app-spn>`;
+GRANT USE SCHEMA ON SCHEMA system.access TO `<app-spn>`;
+GRANT SELECT ON SCHEMA system.access TO `<app-spn>`;
 ```
 
 **Grant warehouse access** (via API — replace values):
@@ -204,29 +211,16 @@ databricks bundle run lineage-explorer -t prod --profile my-spn-profile
 
 ---
 
-## Optional: Enhanced Lineage Privileges
+## Lineage Data Source
 
-Without optional privileges, the app infers lineage from naming conventions, column overlap, and query history (~60-85% coverage). Adding system table access improves coverage:
+Lineage data comes exclusively from Unity Catalog system tables — the source of truth captured from actual query execution:
 
-```sql
--- Enables view definition parsing (~85-90% coverage)
-GRANT SELECT ON SCHEMA <catalog>.<schema> TO `<app-spn>`;
+- **`system.access.table_lineage`** — Table-to-table data flow relationships
+- **`system.access.column_lineage`** — Column-level data flow relationships
 
--- Enables real Unity Catalog lineage (~100% coverage, requires metastore admin)
-GRANT USE CATALOG ON CATALOG system TO `<app-spn>`;
-GRANT USE SCHEMA ON SCHEMA system.access TO `<app-spn>`;
-GRANT SELECT ON SCHEMA system.access TO `<app-spn>`;
-GRANT USE SCHEMA ON SCHEMA system.query TO `<app-spn>`;
-GRANT SELECT ON SCHEMA system.query TO `<app-spn>`;
-```
+There are no inference strategies, no regex parsing, no heuristics, and no guessing. If Unity Catalog has captured a lineage relationship from a query that was actually executed, it shows up. If not, it doesn't. This means zero false positives.
 
-| Privileges Granted | Lineage Strategies | Approx Coverage |
-|---|---|---|
-| Minimum only (no SELECT) | Naming conventions + column overlap | ~60-70% |
-| + SELECT on schema | Above + view definition parsing | ~85-90% |
-| + SELECT on system tables | Real Unity Catalog lineage | ~100% |
-
-The app **never crashes** regardless of privilege level — all optional queries are wrapped in try/except with graceful fallback.
+The system tables require `SELECT` on `system.access` — this is included in the required grants above. The lineage system tables are populated automatically by Unity Catalog when queries (CTAS, INSERT, MERGE, etc.) are executed against tables in the catalog.
 
 ---
 
@@ -246,17 +240,11 @@ The app **never crashes** regardless of privilege level — all optional queries
 | `USE CATALOG` on target catalog | Yes | Yes (if SPN) | `GRANT USE CATALOG ON CATALOG <cat> TO \`<spn>\`` |
 | `BROWSE` on target catalog | Yes | Yes (if SPN) | `GRANT BROWSE ON CATALOG <cat> TO \`<spn>\`` |
 | `USE SCHEMA` on target schema(s) | Yes | Yes (if SPN) | `GRANT USE SCHEMA ON SCHEMA <cat>.<sch> TO \`<spn>\`` |
+| `USE CATALOG` on `system` | Yes | No | `GRANT USE CATALOG ON CATALOG system TO \`<spn>\`` |
+| `USE SCHEMA` on `system.access` | Yes | No | `GRANT USE SCHEMA ON SCHEMA system.access TO \`<spn>\`` |
+| `SELECT` on `system.access` | Yes | No | `GRANT SELECT ON SCHEMA system.access TO \`<spn>\`` |
 | `CAN_USE` on SQL Warehouse | Yes | Yes (if SPN) | Permissions API (PUT) or UI |
 | Workspace membership | Auto (app SPN is auto-added) | Must exist in workspace | Add via SCIM API or UI |
-
-### Optional Permissions (Enhanced Lineage)
-
-| Permission | Purpose |
-|-----------|---------|
-| `SELECT` on target schema | View definition parsing for lineage inference |
-| `USE CATALOG` on `system` | Access to system tables |
-| `SELECT` on `system.access` | Real table/column lineage from Unity Catalog |
-| `SELECT` on `system.query` | Query history parsing for CTAS lineage |
 
 ---
 
@@ -296,10 +284,9 @@ The app **never crashes** regardless of privilege level — all optional queries
 ┌─────────────────────────────────────────────────────────────────────┐
 │                       UNITY CATALOG                                 │
 │                                                                     │
-│   information_schema          system.access          system.query   │
-│   ├── tables                  ├── table_lineage      └── history    │
-│   ├── columns                 └── column_lineage                    │
-│   └── views                                                         │
+│   information_schema               system.access                    │
+│   ├── tables                       ├── table_lineage                │
+│   └── columns                      └── column_lineage               │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -324,8 +311,6 @@ All configuration is via environment variables. When deploying via DABs, `DATABR
 | `CACHE_MAX_ENTRIES` | `500` | Maximum number of entries in the LRU cache. When exceeded, least-recently-used entries are evicted. At ~50-200KB per lineage graph, 500 entries uses ~25-100MB of the 6GB app runtime. Increase for workspaces with many catalogs/schemas; decrease to save memory. |
 | `ADMIN_GROUP_NAME` | `admins` | Workspace group whose members can enable live mode. The app reads group membership from the user's own token via `current_user.me()` — no SPN IAM permissions needed. |
 | `SQL_WAIT_TIMEOUT` | `50s` | SQL statement execution timeout (max 50s per API limit) |
-| `QUERY_HISTORY_DAYS` | `7` | How many days of query history to scan for lineage inference |
-| `QUERY_HISTORY_LIMIT` | `200` | Max query history rows to scan per schema |
 | `RATE_LIMIT_MAX_REQUESTS` | `60` | Max API requests per IP per window |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate limit window duration |
 
@@ -488,16 +473,20 @@ The app runtime has 6GB RAM. At the default of 500 entries, cache uses at most ~
 
 ---
 
-## Lineage Inference Engine
+## How Lineage Is Captured
 
-When `system.access.table_lineage` is not accessible, lineage is inferred:
+Lineage Explorer does not generate or infer lineage. It visualizes lineage that Unity Catalog has already captured from actual query execution.
 
-1. **View definitions** — Parses `FROM`/`JOIN` references from `information_schema.views`
-2. **Query history** — Scans recent CTAS/INSERT from `system.query.history` (configurable via `QUERY_HISTORY_DAYS`)
-3. **Naming conventions** — Maps `raw_X` -> `cleaned_X` (medallion architecture)
-4. **Column overlap** — Tables sharing >30% columns or 2+ matches are linked
+Unity Catalog automatically records lineage when queries like the following are executed:
 
-All strategies are additive and deduplicated.
+| Query Type | Example | What UC Captures |
+|-----------|---------|-----------------|
+| `CREATE TABLE AS SELECT` | `CREATE TABLE gold.summary AS SELECT ... FROM silver.orders` | `silver.orders` → `gold.summary` (table + column level) |
+| `INSERT INTO ... SELECT` | `INSERT INTO silver.cleaned SELECT ... FROM bronze.raw` | `bronze.raw` → `silver.cleaned` |
+| `MERGE INTO` | `MERGE INTO target USING source ON ...` | `source` → `target` |
+| `CREATE VIEW` | `CREATE VIEW vw AS SELECT ... FROM t1 JOIN t2` | `t1` → `vw`, `t2` → `vw` |
+
+If a table has no lineage in the graph, it means no tracked query has written to or read from it yet. Run a query against it and lineage will appear on the next refresh.
 
 ---
 
@@ -514,7 +503,7 @@ lineage-explorer/
 ├── backend/
 │   ├── __init__.py
 │   ├── main.py                 # FastAPI app, middleware, validation, health check
-│   ├── lineage_service.py      # DBSQL queries, cache, inference engine
+│   ├── lineage_service.py      # DBSQL queries against system tables, LRU cache
 │   └── models.py               # Pydantic models
 └── frontend/
     ├── package.json
@@ -613,9 +602,9 @@ GROUP BY usage_date;
 **Set guardrails:**
 - **Serverless budget policies** — Set spending caps on APPS and SQL SKUs
 - **Billing alerts** — Get notified if daily spend exceeds thresholds
-- **Limited SPN permissions** — App service principal only gets `USE CATALOG` + `BROWSE` + `USE SCHEMA` (no broad `SELECT` on raw data)
+- **Limited SPN permissions** — App SPN gets access to target catalog metadata and `system.access` for lineage only — no `SELECT` on user data tables
 - **Rate limiting** — 60 req/min/IP prevents runaway query patterns
-- **No `SELECT *` on raw tables** — All app queries target lightweight metadata tables only
+- **Metadata-only queries** — All app queries target `information_schema` and `system.access` — never user data tables
 
 ---
 
@@ -624,10 +613,9 @@ GROUP BY usage_date;
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | "No SQL warehouse available" | `DATABRICKS_WAREHOUSE_ID` not set | Pass `--var warehouse_id=<id>` during `bundle deploy` |
-| Empty lineage graph | App SPN lacks BROWSE on catalog | Grant `BROWSE` on the target catalog to the app SPN |
+| Empty lineage graph | App SPN lacks `SELECT` on `system.access` | Grant `USE CATALOG` on `system`, `USE SCHEMA` on `system.access`, and `SELECT` on `system.access` to the app SPN |
+| Tables visible but no edges | No lineage captured by Unity Catalog yet | Run a query (CTAS, INSERT, MERGE) against the tables — lineage is captured from actual query execution |
 | Catalog not visible in app | App SPN lacks USE CATALOG | Grant `USE CATALOG` on the target catalog to the app SPN |
-| Only naming-convention edges | `system.access` not accessible | Grant `SELECT` on `system.access` to the app SPN |
-| Query history timeout on cold start | Serverless warehouse cold + large history | Normal — app falls back to other inference methods. Lineage coverage improves on subsequent requests |
 | `bundle deploy` host mismatch | Wrong profile or missing `--profile` flag | Use `--profile <name>` matching your `~/.databrickscfg` |
 | `bundle deploy` missing variable | No `--var warehouse_id` provided | Add `--var warehouse_id=<id>` to the deploy command |
 | Edges misaligned after expand | React Flow handle cache stale | Fixed — `useUpdateNodeInternals` called after animation |
