@@ -75,21 +75,30 @@ export async function layoutGraph(
     if (bottom > graphBottom) graphBottom = bottom;
   }
 
-  // Position orphan nodes in a grid below the main graph
-  const ORPHAN_GAP_Y = 80; // gap between connected graph and orphan section
-  const ORPHAN_SPACING_X = 40;
-  const ORPHAN_SPACING_Y = 30;
-  const ORPHAN_COLS = 3;
+  // Position orphan nodes in rows below the main graph
+  // Flow left-to-right, 10 per row, with enough gap to avoid overlap
+  const ORPHAN_GAP_Y = 100; // gap between connected graph and orphan section
+  const ORPHAN_NODE_GAP = 60; // horizontal gap between orphan nodes
+  const ORPHAN_ROW_GAP = 50; // vertical gap between orphan rows
+  const ORPHAN_PER_ROW = 10;
   const orphanStartY = connectedNodes.length > 0 ? graphBottom + ORPHAN_GAP_Y : 60;
 
   const orphanPositions = new Map<string, { x: number; y: number }>();
-  orphanNodes.forEach((node, i) => {
-    const col = i % ORPHAN_COLS;
-    const row = Math.floor(i / ORPHAN_COLS);
-    orphanPositions.set(node.id, {
-      x: graphLeft + col * (COMPACT_WIDTH + ORPHAN_SPACING_X),
-      y: orphanStartY + row * (COMPACT_HEIGHT + ORPHAN_SPACING_Y),
-    });
+  let currentX = graphLeft;
+  let currentY = orphanStartY;
+  let countInRow = 0;
+
+  orphanNodes.forEach((node) => {
+    if (countInRow >= ORPHAN_PER_ROW) {
+      currentX = graphLeft;
+      currentY += COMPACT_HEIGHT + ORPHAN_ROW_GAP;
+      countInRow = 0;
+    }
+    orphanPositions.set(node.id, { x: currentX, y: currentY });
+    // Estimate width based on name length (wider names need more space)
+    const nameWidth = Math.max(COMPACT_WIDTH, (node.data?.name?.length || 15) * 11 + 120);
+    currentX += nameWidth + ORPHAN_NODE_GAP;
+    countInRow++;
   });
 
   // Merge positions
