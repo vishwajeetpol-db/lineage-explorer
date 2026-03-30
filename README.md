@@ -183,41 +183,6 @@ databricks apps get lineage-explorer-dev --profile <your-profile> -o json \
 
 Open the URL, select a catalog and schema, click "Generate Lineage".
 
-### Alternative: Fast Deploy via deploy.sh (~10 seconds)
-
-The `databricks bundle deploy` command can be slow because it syncs all project files (including frontend source, package-lock.json, and dev scripts) to the workspace. The `deploy.sh` script bypasses this by staging only the 10 runtime files the app actually needs (~2MB) and deploying directly via the Databricks Apps API.
-
-```bash
-./deploy.sh <profile> <warehouse-id> [app-name]
-```
-
-**Examples:**
-```bash
-# Deploy with default app name (lineage-explorer)
-./deploy.sh my-profile abc123def456
-
-# Deploy with a custom app name
-./deploy.sh my-profile abc123def456 my-lineage-app
-```
-
-**What it does:**
-1. Auto-resolves the deploying user's workspace path from the CLI profile (no hardcoded paths)
-2. Creates a temp staging directory with only runtime files: `app.yaml`, `requirements.txt`, `backend/*.py`, `frontend/dist/*`
-3. Injects the warehouse ID into the staging copy of `app.yaml` (the repo file stays parameterized with `<your-warehouse-id>`)
-4. Uploads the 10 files via `databricks workspace import-dir`
-5. Deploys the app via `databricks apps deploy`
-
-**When to use `deploy.sh` vs `bundle deploy`:**
-
-| | `deploy.sh` | `bundle deploy` |
-|---|------------|----------------|
-| **Speed** | ~10 seconds | 1-5 minutes |
-| **Files uploaded** | 10 (runtime only) | 38+ (includes source, configs) |
-| **Size uploaded** | ~2MB | ~10MB+ |
-| **Manages app resource** | No (app must already exist) | Yes (creates/updates app) |
-| **Workspace path** | Auto-resolved from CLI profile | Configured in `databricks.yml` |
-| **Best for** | Iterative development, quick fixes | First-time setup, CI/CD |
-
 ---
 
 ## Deploying via CI/CD (Service Principal)
@@ -557,9 +522,7 @@ If a table has no lineage in the graph, it means no tracked query has written to
 
 ```
 lineage-explorer/
-├── databricks.yml              # DABs config — THE canonical deployment config
-├── app.yaml                    # App runtime config (warehouse_id parameterized)
-├── deploy.sh                   # Fast deploy script (~10s, runtime files only)
+├── databricks.yml              # DABs config — the single source of truth for deployment
 ├── requirements.txt            # Python deps (pinned ranges)
 ├── .gitignore
 ├── .databricksignore           # Excludes dev files from app deployment
@@ -689,7 +652,6 @@ GROUP BY usage_date;
 | Live toggle disabled for admin | `x-forwarded-access-token` header missing | The workspace preview is enabled but OAuth scopes are not configured on the app. Add `iam.current-user:read` and `iam.access-control:read` scopes via the Databricks Apps UI (see [Step 4](#step-4-enable-user-authorization-workspace-preview)). |
 | Live toggle disabled for admin | `more than one authorization method` in logs | Fixed in code — `auth_type="pat"` forces token-only auth on user-scoped client. If you see this, redeploy with latest code. |
 | Live toggle disabled for admin | Admin group name mismatch | Default group is `admins`. If your workspace uses a different group, set `ADMIN_GROUP_NAME` env var. |
-| `deploy.sh` fails "app not found" | App doesn't exist yet | Run `databricks bundle deploy` first to create the app resource, then use `deploy.sh` for subsequent deploys. |
 
 ---
 

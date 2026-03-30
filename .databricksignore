@@ -1,12 +1,6 @@
 # ============================================================================
-# NOTE: .databricksignore is NOT reliably respected by `databricks bundle deploy`
-# or `databricks sync` in CLI v0.292.0. Use the staging deploy method instead:
-#
-#   1. Copy runtime files to /tmp/lineage-deploy-staging (see deploy.sh)
-#   2. databricks workspace import-dir /tmp/lineage-deploy-staging <dest>
-#   3. databricks apps deploy <app-name> --source-code-path <dest>
-#
-# This file is kept for documentation and future CLI compatibility.
+# Excludes non-runtime files from `databricks bundle deploy` uploads.
+# Note: .databricksignore may not be reliably respected in all CLI versions.
 # ============================================================================
 
 # Frontend dev files (only frontend/dist/ needed at runtime)
