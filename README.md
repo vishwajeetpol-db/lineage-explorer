@@ -109,15 +109,21 @@ echo "App SPN: $APP_SPN"
 
 **Required grants** (all required for the app to function):
 
+**Target catalog/schema access** — can be granted by the catalog owner or any user with `MANAGE` on the catalog:
+
 ```sql
 -- Replace <catalog>, <schema>, and <app-spn> with actual values
-
--- Target catalog/schema access
 GRANT USE CATALOG ON CATALOG <catalog> TO `<app-spn>`;
 GRANT BROWSE ON CATALOG <catalog> TO `<app-spn>`;
 GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO `<app-spn>`;
+```
 
--- System tables access (required for lineage data)
+**System tables access** (required for lineage data) — must be granted by an **account admin**. The `system` catalog is owned by Databricks at the account level; workspace admins and metastore admins cannot grant privileges on it. See [System tables documentation](https://docs.databricks.com/aws/en/admin/system-tables/) for details.
+
+> **Note:** In many workspaces, the `account users` group already has `USE CATALOG`, `USE SCHEMA`, and `SELECT` on the `system` catalog. If so, the app SPN inherits these permissions automatically and the grants below can be skipped. Run `SHOW GRANTS ON CATALOG system` to check.
+
+```sql
+-- These grants require an account admin to execute
 GRANT USE CATALOG ON CATALOG system TO `<app-spn>`;
 GRANT USE SCHEMA ON SCHEMA system.access TO `<app-spn>`;
 GRANT SELECT ON SCHEMA system.access TO `<app-spn>`;
@@ -221,7 +227,7 @@ Lineage data comes exclusively from Unity Catalog system tables — the source o
 
 There are no inference strategies, no regex parsing, no heuristics, and no guessing. If Unity Catalog has captured a lineage relationship from a query that was actually executed, it shows up. If not, it doesn't. This means zero false positives.
 
-The system tables require `SELECT` on `system.access` — this is included in the required grants above. The lineage system tables are populated automatically by Unity Catalog when queries (CTAS, INSERT, MERGE, etc.) are executed against tables in the catalog.
+The system tables require `SELECT` on `system.access` — this is included in the required grants above. These grants on the `system` catalog must be issued by an **account admin** (see [System tables](https://docs.databricks.com/aws/en/admin/system-tables/)). In many workspaces, `account users` already has these privileges, in which case explicit grants are not needed. The lineage system tables are populated automatically by Unity Catalog when queries (CTAS, INSERT, MERGE, etc.) are executed against tables in the catalog.
 
 **Note**: There are scenarios where data flow exists but lineage is not captured in system tables (e.g., path-based access, RDD operations, renamed objects, certain DLT patterns). These are Unity Catalog platform limitations, not Lineage Explorer limitations. For the current list of known gaps and supported compute types, refer to the official Databricks documentation:
 - [View data lineage using Unity Catalog](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-lineage)
@@ -240,16 +246,18 @@ The system tables require `SELECT` on `system.access` — this is included in th
 
 ### Required Permissions Matrix
 
-| Permission | App SPN | Deploying SPN | How to Grant |
-|-----------|---------|--------------|-------------|
-| `USE CATALOG` on target catalog | Yes | Yes (if SPN) | `GRANT USE CATALOG ON CATALOG <cat> TO \`<spn>\`` |
-| `BROWSE` on target catalog | Yes | Yes (if SPN) | `GRANT BROWSE ON CATALOG <cat> TO \`<spn>\`` |
-| `USE SCHEMA` on target schema(s) | Yes | Yes (if SPN) | `GRANT USE SCHEMA ON SCHEMA <cat>.<sch> TO \`<spn>\`` |
-| `USE CATALOG` on `system` | Yes | No | `GRANT USE CATALOG ON CATALOG system TO \`<spn>\`` |
-| `USE SCHEMA` on `system.access` | Yes | No | `GRANT USE SCHEMA ON SCHEMA system.access TO \`<spn>\`` |
-| `SELECT` on `system.access` | Yes | No | `GRANT SELECT ON SCHEMA system.access TO \`<spn>\`` |
-| `CAN_USE` on SQL Warehouse | Yes | Yes (if SPN) | Permissions API (PUT) or UI |
-| Workspace membership | Auto (app SPN is auto-added) | Must exist in workspace | Add via SCIM API or UI |
+| Permission | App SPN | Deploying SPN | Who Can Grant | How to Grant |
+|-----------|---------|--------------|---------------|-------------|
+| `USE CATALOG` on target catalog | Yes | Yes (if SPN) | Catalog owner or user with `MANAGE` | `GRANT USE CATALOG ON CATALOG <cat> TO \`<spn>\`` |
+| `BROWSE` on target catalog | Yes | Yes (if SPN) | Catalog owner or user with `MANAGE` | `GRANT BROWSE ON CATALOG <cat> TO \`<spn>\`` |
+| `USE SCHEMA` on target schema(s) | Yes | Yes (if SPN) | Catalog/schema owner or user with `MANAGE` | `GRANT USE SCHEMA ON SCHEMA <cat>.<sch> TO \`<spn>\`` |
+| `USE CATALOG` on `system` | Yes | No | **Account admin only** | `GRANT USE CATALOG ON CATALOG system TO \`<spn>\`` |
+| `USE SCHEMA` on `system.access` | Yes | No | **Account admin only** | `GRANT USE SCHEMA ON SCHEMA system.access TO \`<spn>\`` |
+| `SELECT` on `system.access` | Yes | No | **Account admin only** | `GRANT SELECT ON SCHEMA system.access TO \`<spn>\`` |
+| `CAN_USE` on SQL Warehouse | Yes | Yes (if SPN) | Warehouse owner or workspace admin | Permissions API (PUT) or UI |
+| Workspace membership | Auto (app SPN is auto-added) | Must exist in workspace | Workspace admin | Add via SCIM API or UI |
+
+> **Note:** The `system` catalog is managed at the account level by Databricks. Workspace admins and metastore admins **cannot** grant privileges on it — only account admins can. However, if `account users` already has the required grants (common in many workspaces), explicit per-SPN grants are unnecessary. Verify with `SHOW GRANTS ON CATALOG system`.
 
 ---
 
@@ -631,7 +639,7 @@ GROUP BY usage_date;
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | "No SQL warehouse available" | `DATABRICKS_WAREHOUSE_ID` not set | Pass `--var warehouse_id=<id>` during `bundle deploy` |
-| Empty lineage graph | App SPN lacks `SELECT` on `system.access` | Grant `USE CATALOG` on `system`, `USE SCHEMA` on `system.access`, and `SELECT` on `system.access` to the app SPN |
+| Empty lineage graph | App SPN lacks `SELECT` on `system.access` | An **account admin** must grant `USE CATALOG` on `system`, `USE SCHEMA` on `system.access`, and `SELECT` on `system.access` to the app SPN. Alternatively, check if `account users` already has these grants (`SHOW GRANTS ON CATALOG system`). |
 | Tables visible but no edges | No lineage captured by Unity Catalog yet | Run a query (CTAS, INSERT, MERGE) against the tables — lineage is captured from actual query execution |
 | Catalog not visible in app | App SPN lacks USE CATALOG | Grant `USE CATALOG` on the target catalog to the app SPN |
 | `bundle deploy` host mismatch | Wrong profile or missing `--profile` flag | Use `--profile <name>` matching your `~/.databrickscfg` |
