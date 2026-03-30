@@ -103,7 +103,7 @@ The app's admin-only live mode requires **on-behalf-of-user authorization** — 
 **Enable the preview:**
 
 1. Open the workspace admin console: **Settings > Workspace > Previews**
-2. Find and enable: **"Agent Framework: On-Behalf-Of-User Authorization Public Preview"**
+2. Find and enable: **"Databricks Apps - On-Behalf-Of User Authorization Public Preview"**
 3. Save the change
 
 **Configure scopes on the app:**
@@ -451,7 +451,7 @@ The app identifies the current user and checks their admin status to control acc
 
 User authorization requires two things to be in place (see [Step 4](#step-4-enable-user-authorization-workspace-preview) for setup instructions):
 
-1. **Workspace preview enabled:** The workspace must have the **"Agent Framework: On-Behalf-Of-User Authorization Public Preview"** feature turned on in **Settings > Workspace > Previews**. Without this, the app cannot receive user tokens regardless of scope configuration.
+1. **Workspace preview enabled:** The workspace must have the **"Databricks Apps - On-Behalf-Of User Authorization Public Preview"** feature turned on in **Settings > Workspace > Previews**. Without this, the app cannot receive user tokens regardless of scope configuration.
 
 2. **OAuth scopes configured on the app:** The following scopes must be added to the app via the Databricks Apps UI:
 
@@ -685,7 +685,7 @@ GROUP BY usage_date;
 | Blank white screen | Unhandled React error | Fixed — ErrorBoundary catches and shows recovery UI |
 | 429 Too Many Requests | Rate limit exceeded | Wait and retry, or increase via `RATE_LIMIT_MAX_REQUESTS` env var |
 | 400 "Invalid catalog" | Special chars in identifier | Use only alphanumeric + underscores |
-| Live toggle disabled for all users | `user token passthrough feature is not enabled` in API response | The workspace preview **"Agent Framework: On-Behalf-Of-User Authorization Public Preview"** is not enabled. A workspace admin must enable it in **Settings > Workspace > Previews** (see [Step 4](#step-4-enable-user-authorization-workspace-preview)). |
+| Live toggle disabled for all users | `user token passthrough feature is not enabled` in API response | The workspace preview **"Databricks Apps - On-Behalf-Of User Authorization Public Preview"** is not enabled. A workspace admin must enable it in **Settings > Workspace > Previews** (see [Step 4](#step-4-enable-user-authorization-workspace-preview)). |
 | Live toggle disabled for admin | `x-forwarded-access-token` header missing | The workspace preview is enabled but OAuth scopes are not configured on the app. Add `iam.current-user:read` and `iam.access-control:read` scopes via the Databricks Apps UI (see [Step 4](#step-4-enable-user-authorization-workspace-preview)). |
 | Live toggle disabled for admin | `more than one authorization method` in logs | Fixed in code — `auth_type="pat"` forces token-only auth on user-scoped client. If you see this, redeploy with latest code. |
 | Live toggle disabled for admin | Admin group name mismatch | Default group is `admins`. If your workspace uses a different group, set `ADMIN_GROUP_NAME` env var. |
