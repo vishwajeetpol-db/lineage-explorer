@@ -96,7 +96,40 @@ databricks bundle run lineage-explorer -t dev --profile <your-workspace-profile>
 
 No files to edit. The `--profile` flag selects the workspace from `~/.databrickscfg`, and `--var` provides the warehouse ID.
 
-### Step 4: Grant Permissions to the App's SPN
+### Step 4: Enable User Authorization (Workspace Preview)
+
+The app's admin-only live mode requires **on-behalf-of-user authorization** — a feature that lets the app receive the logged-in user's identity and determine whether they are a workspace admin. This is delivered as a workspace-level preview that must be enabled before the app can use it.
+
+**Enable the preview:**
+
+1. Open the workspace admin console: **Settings > Workspace > Previews**
+2. Find and enable: **"Agent Framework: On-Behalf-Of-User Authorization Public Preview"**
+3. Save the change
+
+**Configure scopes on the app:**
+
+Once the preview is active, add the required OAuth scopes to the app so that the Databricks Apps proxy forwards the user's access token:
+
+1. Navigate to **Compute > Apps > lineage-explorer-dev**
+2. Click **Edit** (or the gear icon)
+3. Under **User Authorization**, click **+Add scope**
+4. Add the following scopes:
+   - `iam.current-user:read` — allows the app to read the user's identity and group memberships
+   - `iam.access-control:read` — allows the app to read access control information
+5. Save — the app will redeploy automatically
+
+You can verify the scopes were applied by checking the app's configuration:
+
+```bash
+databricks apps get lineage-explorer-dev --profile <your-profile> -o json \
+  | python3 -c "import sys,json; print(json.load(sys.stdin).get('effective_user_api_scopes', 'NOT CONFIGURED'))"
+```
+
+The output should show `['iam.current-user:read', 'iam.access-control:read']`. If it shows `NOT CONFIGURED`, the workspace preview has not been enabled or the scopes were not saved.
+
+> **Why this matters:** Without this step, the app cannot identify the logged-in user. The live mode toggle will appear disabled for all users — including workspace admins — because the backend has no way to verify admin group membership. All other app functionality (cached lineage, column lineage, search) works without this step.
+
+### Step 5: Grant Permissions to the App's SPN
 
 After deployment, Databricks auto-creates a service principal for the app. Grant it access:
 
@@ -140,7 +173,7 @@ curl -X PUT "https://<workspace-host>/api/2.0/permissions/sql/warehouses/<wareho
 
 Or via UI: **SQL Warehouses > Your Warehouse > Permissions > Add the app SPN with "Can Use"**
 
-### Step 5: Verify
+### Step 6: Verify
 
 ```bash
 # Get app URL
@@ -416,14 +449,18 @@ The app identifies the current user and checks their admin status to control acc
 
 ### Prerequisites
 
-The app must have user authorization enabled with at least these OAuth scopes (configured in the Databricks Apps UI):
+User authorization requires two things to be in place (see [Step 4](#step-4-enable-user-authorization-workspace-preview) for setup instructions):
+
+1. **Workspace preview enabled:** The workspace must have the **"Agent Framework: On-Behalf-Of-User Authorization Public Preview"** feature turned on in **Settings > Workspace > Previews**. Without this, the app cannot receive user tokens regardless of scope configuration.
+
+2. **OAuth scopes configured on the app:** The following scopes must be added to the app via the Databricks Apps UI:
 
 | Scope | Purpose |
 |-------|---------|
 | `iam.current-user:read` | Read the user's identity and group memberships |
-| `iam.access-control:read` | Read access control information (default scope) |
+| `iam.access-control:read` | Read access control information |
 
-These are default scopes that Databricks Apps includes automatically.
+> **Note:** These scopes are **not** added automatically. They must be configured manually after deployment. If the `effective_user_api_scopes` field is absent from the app's configuration, user authorization is not active.
 
 ### Customizing the Admin Group
 
@@ -648,7 +685,8 @@ GROUP BY usage_date;
 | Blank white screen | Unhandled React error | Fixed — ErrorBoundary catches and shows recovery UI |
 | 429 Too Many Requests | Rate limit exceeded | Wait and retry, or increase via `RATE_LIMIT_MAX_REQUESTS` env var |
 | 400 "Invalid catalog" | Special chars in identifier | Use only alphanumeric + underscores |
-| Live toggle disabled for admin | `x-forwarded-access-token` header missing | Enable user authorization on the app in the Databricks Apps UI. Ensure `iam.current-user:read` scope is included. |
+| Live toggle disabled for all users | `user token passthrough feature is not enabled` in API response | The workspace preview **"Agent Framework: On-Behalf-Of-User Authorization Public Preview"** is not enabled. A workspace admin must enable it in **Settings > Workspace > Previews** (see [Step 4](#step-4-enable-user-authorization-workspace-preview)). |
+| Live toggle disabled for admin | `x-forwarded-access-token` header missing | The workspace preview is enabled but OAuth scopes are not configured on the app. Add `iam.current-user:read` and `iam.access-control:read` scopes via the Databricks Apps UI (see [Step 4](#step-4-enable-user-authorization-workspace-preview)). |
 | Live toggle disabled for admin | `more than one authorization method` in logs | Fixed in code — `auth_type="pat"` forces token-only auth on user-scoped client. If you see this, redeploy with latest code. |
 | Live toggle disabled for admin | Admin group name mismatch | Default group is `admins`. If your workspace uses a different group, set `ADMIN_GROUP_NAME` env var. |
 | `deploy.sh` fails "app not found" | App doesn't exist yet | Run `databricks bundle deploy` first to create the app resource, then use `deploy.sh` for subsequent deploys. |
