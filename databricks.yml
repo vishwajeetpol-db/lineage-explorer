@@ -17,6 +17,11 @@ targets:
           name: lineage-explorer-dev
           description: "Unity Catalog Lineage Explorer - Interactive DAG visualization"
           source_code_path: .
+          resources:
+            - name: sql-warehouse
+              sql_warehouse:
+                id: ${var.warehouse_id}
+                permission: CAN_USE
           config:
             command:
               - uvicorn
@@ -39,6 +44,11 @@ targets:
           name: lineage-explorer
           description: "Unity Catalog Lineage Explorer - Interactive DAG visualization"
           source_code_path: .
+          resources:
+            - name: sql-warehouse
+              sql_warehouse:
+                id: ${var.warehouse_id}
+                permission: CAN_USE
           config:
             command:
               - uvicorn

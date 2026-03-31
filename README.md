@@ -28,10 +28,11 @@ Interactive data lineage visualization for Databricks Unity Catalog. Explore tab
 
 | Requirement | How to Check |
 |-------------|-------------|
-| Databricks CLI v0.239+ | `databricks --version` |
-| CLI authenticated to target workspace | `databricks auth login --profile <name>` |
+| [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/) v0.239+ | `databricks --version` |
+| CLI authenticated to target workspace | `databricks auth login --profile <name>` ([auth docs](https://docs.databricks.com/aws/en/dev-tools/cli/authentication)) |
 | SQL Warehouse (serverless or pro) | Note the warehouse ID from UI or `databricks warehouses list` |
 | Unity Catalog enabled | At least one catalog with data to explore |
+| [Workspace preview](#step-4-enable-user-authorization-workspace-preview) enabled (for live mode) | **"Databricks Apps - On-Behalf-Of User Authorization Public Preview"** in Settings > Previews |
 | Node.js 18+ (only if rebuilding frontend) | `node --version` — pre-built `dist/` is committed, so this is optional |
 
 ### Step 1: Clone
@@ -43,7 +44,7 @@ cd lineage-explorer
 
 ### Step 2: Create a CLI Profile for Your Workspace
 
-A CLI profile stores your workspace URL and authentication in `~/.databrickscfg` so you don't have to provide them on every command.
+A CLI profile stores your workspace URL and authentication in `~/.databrickscfg` so you don't have to provide them on every command. See the [CLI authentication docs](https://docs.databricks.com/aws/en/dev-tools/cli/authentication) for all supported auth methods.
 
 **Option A: Human user (interactive OAuth)**
 
@@ -73,7 +74,7 @@ client_secret = <spn-secret>
 auth_type     = oauth-m2m
 ```
 
-The SPN must exist in the workspace and have permissions to create apps (see [Deploying via CI/CD](#deploying-via-cicd-service-principal) for required grants).
+The SPN must exist in the workspace and have permissions to create apps (see [Deploying via CI/CD](#deploying-via-cicd-service-principal) for required grants). See [OAuth M2M authentication](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m) for details on service principal auth.
 
 **Verify either option:**
 
@@ -81,7 +82,7 @@ The SPN must exist in the workspace and have permissions to create apps (see [De
 databricks workspace list / --profile <your-profile-name>
 ```
 
-### Step 3: Deploy via DABs (One Command)
+### Step 3: Deploy via [DABs](https://docs.databricks.com/aws/en/dev-tools/bundles/) (One Command)
 
 ```bash
 databricks bundle deploy -t dev \
@@ -98,7 +99,7 @@ No files to edit. The `--profile` flag selects the workspace from `~/.databricks
 
 ### Step 4: Enable User Authorization (Workspace Preview)
 
-The app's admin-only live mode requires **on-behalf-of-user authorization** — a feature that lets the app receive the logged-in user's identity and determine whether they are a workspace admin. This is delivered as a workspace-level preview that must be enabled before the app can use it.
+The app's admin-only live mode requires [on-behalf-of-user authorization](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/auth) — a feature that lets the app receive the logged-in user's identity and determine whether they are a workspace admin. This is delivered as a workspace-level preview that must be enabled before the app can use it.
 
 **Enable the preview:**
 
@@ -142,7 +143,7 @@ echo "App SPN: $APP_SPN"
 
 **Required grants** (all required for the app to function):
 
-**Target catalog/schema access** — can be granted by the catalog owner or any user with `MANAGE` on the catalog:
+**Target catalog/schema access** — can be granted by the catalog owner or any user with `MANAGE` on the catalog. See [Unity Catalog privileges](https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges) for details.
 
 ```sql
 -- Replace <catalog>, <schema>, and <app-spn> with actual values
@@ -150,6 +151,8 @@ GRANT USE CATALOG ON CATALOG <catalog> TO `<app-spn>`;
 GRANT BROWSE ON CATALOG <catalog> TO `<app-spn>`;
 GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO `<app-spn>`;
 ```
+
+> **Security note:** The app does **not** need `SELECT` on any user catalog or schema. It reads only object metadata (`information_schema.tables`, `information_schema.columns`) via `BROWSE` — never the data itself. Do not grant `SELECT` on user schemas to the app SPN.
 
 **System tables access** (required for lineage data) — must be granted by an **account admin**. The `system` catalog is owned by Databricks at the account level; workspace admins and metastore admins cannot grant privileges on it. See [System tables documentation](https://docs.databricks.com/aws/en/admin/system-tables/) for details.
 
@@ -185,7 +188,7 @@ Open the URL, select a catalog and schema, click "Generate Lineage".
 
 ---
 
-## Deploying via CI/CD (Service Principal)
+## Deploying via CI/CD ([Service Principal](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m))
 
 When deploying with an external SPN (not a human user), the **deploying SPN** also needs permissions:
 
@@ -213,6 +216,8 @@ Then deploy:
 databricks bundle deploy -t prod --profile my-spn-profile --var warehouse_id=<wh-id>
 databricks bundle run lineage-explorer -t prod --profile my-spn-profile
 ```
+
+> **Important:** After deployment, you must still complete [Step 4 (User Authorization)](#step-4-enable-user-authorization-workspace-preview) and [Step 5 (App SPN Grants)](#step-5-grant-permissions-to-the-apps-spn) for the app to function fully. The workspace preview and app SPN permissions are per-workspace requirements that apply regardless of deployment method.
 
 ---
 
@@ -249,17 +254,20 @@ The system tables require `SELECT` on `system.access` — this is included in th
 | `USE CATALOG` on target catalog | Yes | Yes (if SPN) | Catalog owner or user with `MANAGE` | `GRANT USE CATALOG ON CATALOG <cat> TO \`<spn>\`` |
 | `BROWSE` on target catalog | Yes | Yes (if SPN) | Catalog owner or user with `MANAGE` | `GRANT BROWSE ON CATALOG <cat> TO \`<spn>\`` |
 | `USE SCHEMA` on target schema(s) | Yes | Yes (if SPN) | Catalog/schema owner or user with `MANAGE` | `GRANT USE SCHEMA ON SCHEMA <cat>.<sch> TO \`<spn>\`` |
+| ~~`SELECT` on target catalog/schema~~ | **No** | **No** | — | Not needed — the app reads only metadata via `BROWSE`, never user data |
 | `USE CATALOG` on `system` | Yes | No | **Account admin only** | `GRANT USE CATALOG ON CATALOG system TO \`<spn>\`` |
 | `USE SCHEMA` on `system.access` | Yes | No | **Account admin only** | `GRANT USE SCHEMA ON SCHEMA system.access TO \`<spn>\`` |
 | `SELECT` on `system.access` | Yes | No | **Account admin only** | `GRANT SELECT ON SCHEMA system.access TO \`<spn>\`` |
 | `CAN_USE` on SQL Warehouse | Yes | Yes (if SPN) | Warehouse owner or workspace admin | Permissions API (PUT) or UI |
 | Workspace membership | Auto (app SPN is auto-added) | Must exist in workspace | Workspace admin | Add via SCIM API or UI |
 
+> **Data isolation:** The app SPN has **zero access to user data**. `BROWSE` grants visibility into object metadata (table names, column names, data types) via `information_schema` — it cannot read, query, or export any rows from user tables. The only `SELECT` grant is on `system.access` for lineage relationships, which contain source/target table names — not data. See [Unity Catalog privileges](https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges) for the full privilege model.
+
 > **Note:** The `system` catalog is managed at the account level by Databricks. Workspace admins and metastore admins **cannot** grant privileges on it — only account admins can. However, if `account users` already has the required grants (common in many workspaces), explicit per-SPN grants are unnecessary. Verify with `SHOW GRANTS ON CATALOG system`.
 
 ---
 
-## Architecture
+## Architecture ([Databricks Apps](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/))
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -425,7 +433,7 @@ User authorization requires two things to be in place (see [Step 4](#step-4-enab
 | `iam.current-user:read` | Read the user's identity and group memberships |
 | `iam.access-control:read` | Read access control information |
 
-> **Note:** These scopes are **not** added automatically. They must be configured manually after deployment. If the `effective_user_api_scopes` field is absent from the app's configuration, user authorization is not active.
+> **Note:** Once the workspace preview is enabled, new apps may inherit default scopes automatically. Verify by checking `effective_user_api_scopes` in the app configuration (see the verification command in [Step 4](#step-4-enable-user-authorization-workspace-preview)). If the field is absent or empty, add the scopes manually via the Databricks Apps UI.
 
 ### Customizing the Admin Group
 
