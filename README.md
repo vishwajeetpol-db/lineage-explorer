@@ -136,7 +136,7 @@ databricks apps get lineage-explorer-dev --profile <your-profile> -o json \
 
 The output should show `['iam.current-user:read', 'iam.access-control:read']`. If it shows `NOT CONFIGURED`, the workspace preview has not been enabled or the scopes were not saved.
 
-> **Why this matters:** Without this step, the app cannot identify the logged-in user. The live mode toggle will appear disabled for all users — including workspace admins — because the backend has no way to verify admin group membership. All other app functionality (cached lineage, column lineage, search) works without this step.
+> **Why this matters:** Without this step, the live mode toggle will appear disabled for all users — including workspace admins. Live mode lets admins bypass the cache and pull the latest lineage directly from system tables. This is useful when new tables or relationships were recently added to the catalog and haven't yet appeared in the cached graph. That said, live mode is not business-critical — the app serves cached lineage by default (refreshed every 8 hours), and relying on the cache avoids unnecessary warehouse compute. All other functionality (cached lineage, column lineage, search) works without this step.
 
 ### Step 5: Grant Permissions to the App's SPN
 
