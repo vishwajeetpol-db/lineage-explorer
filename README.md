@@ -114,7 +114,6 @@ The app's live mode requires [on-behalf-of-user authorization](https://docs.data
 
 1. Open the workspace admin console: **Settings > Workspace > Previews**
 2. Find and enable: **"Databricks Apps - On-Behalf-Of User Authorization Public Preview"**
-3. Save the change
 
 **Configure scopes on the app:**
 
