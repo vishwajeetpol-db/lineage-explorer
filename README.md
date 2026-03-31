@@ -194,39 +194,6 @@ Open the URL, select a catalog and schema, click "Generate Lineage".
 
 ---
 
-## Deploying via CI/CD ([Service Principal](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m))
-
-When deploying with an external SPN (not a human user), the **deploying SPN** also needs permissions:
-
-```sql
--- Deploying SPN needs these to validate the app
-GRANT USE CATALOG ON CATALOG <catalog> TO `<deploying-spn>`;
-GRANT BROWSE ON CATALOG <catalog> TO `<deploying-spn>`;
-GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO `<deploying-spn>`;
-```
-
-Plus warehouse `CAN_USE` (same API call as above, with the deploying SPN's client_id).
-
-Configure the SPN in `~/.databrickscfg`:
-
-```ini
-[my-spn-profile]
-host          = https://<workspace>.cloud.databricks.com
-client_id     = <spn-client-id>
-client_secret = <spn-secret>
-auth_type     = oauth-m2m
-```
-
-Then deploy:
-```bash
-databricks bundle deploy -t prod --profile my-spn-profile --var warehouse_id=<wh-id>
-databricks bundle run lineage-explorer -t prod --profile my-spn-profile
-```
-
-> **Important:** After deployment, you must still complete [Step 4 (User Authorization)](#step-4-enable-user-authorization-workspace-preview) and [Step 5 (App SPN Grants)](#step-5-grant-permissions-to-the-apps-spn) for the app to function fully. The workspace preview and app SPN permissions are per-workspace requirements that apply regardless of deployment method.
-
----
-
 ## Lineage Data Source
 
 Lineage data comes exclusively from Unity Catalog system tables — the source of truth captured from actual query execution:
