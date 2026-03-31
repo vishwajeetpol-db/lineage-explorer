@@ -164,8 +164,6 @@ GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO `<app-spn>`;
 
 **System tables access** (required for lineage data) — must be granted by an **account admin**. The `system` catalog is owned by Databricks at the account level; workspace admins and metastore admins cannot grant privileges on it. See [System tables documentation](https://docs.databricks.com/aws/en/admin/system-tables/) for details.
 
-> **Note:** In many workspaces, the `account users` group already has `USE CATALOG`, `USE SCHEMA`, and `SELECT` on the `system` catalog. If so, the app SPN inherits these permissions automatically and the grants below can be skipped. Run `SHOW GRANTS ON CATALOG system` to check.
-
 ```sql
 -- These grants require an account admin to execute
 GRANT USE CATALOG ON CATALOG system TO `<app-spn>`;
