@@ -108,7 +108,7 @@ No files to edit. The `--profile` flag selects the workspace from `~/.databricks
 
 ### Step 4: Enable User Authorization (Workspace Preview)
 
-The app's live mode requires [on-behalf-of-user authorization](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/auth) — a feature that lets the app receive the logged-in user's identity and determine whether they are a workspace admin. This is delivered as a workspace-level preview that must be enabled before the app can use it.
+The app's live mode requires [on-behalf-of-user authorization](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/auth#user-authorization) — a feature that lets the app receive the logged-in user's identity and determine whether they are a workspace admin. This is delivered as a workspace-level preview that must be enabled before the app can use it.
 
 **Enable the preview:**
 
