@@ -190,7 +190,7 @@ databricks apps get lineage-explorer-dev --profile <your-profile> -o json \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['url'])"
 ```
 
-Open the URL, select a catalog and schema, click "Generate Lineage".
+Open the URL, select a catalog and schema, enable the columns flag if you want to see column lineage, and finally click "Generate Lineage".
 
 ---
 
