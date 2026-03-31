@@ -80,7 +80,9 @@ The SPN must exist in the workspace and have permissions to create apps (see [De
 databricks workspace list / --profile <your-profile-name>
 ```
 
-### Step 3: Deploy via [DABs](https://docs.databricks.com/aws/en/dev-tools/bundles/) (One Command)
+### Step 3: Deploy via [DABs](https://docs.databricks.com/aws/en/dev-tools/bundles/)
+
+**Deploy the bundle** — this uploads the source code to the workspace and creates the app resource:
 
 ```bash
 databricks bundle deploy -t dev \
@@ -88,9 +90,18 @@ databricks bundle deploy -t dev \
   --var warehouse_id=<your-warehouse-id>
 ```
 
-Then start the app:
+Wait for the command to print `Deployment complete!` before proceeding. This typically takes 30-60 seconds on the first deploy as it creates the app resource, and is faster on subsequent deploys.
+
+**Start the app** — once the deploy has completed, start the app compute:
+
 ```bash
 databricks bundle run lineage-explorer -t dev --profile <your-workspace-profile>
+```
+
+This boots the app's compute environment and starts the FastAPI server. The app will take 30-60 seconds to reach `RUNNING` state. You can check progress with:
+
+```bash
+databricks apps get lineage-explorer-dev --profile <your-workspace-profile>
 ```
 
 No files to edit. The `--profile` flag selects the workspace from `~/.databrickscfg`, and `--var` provides the warehouse ID.
