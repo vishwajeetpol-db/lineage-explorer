@@ -14,11 +14,9 @@ Interactive data lineage visualization for Databricks Unity Catalog. Explore tab
 - **System Table Lineage** — Table and column lineage sourced exclusively from `system.access.table_lineage` and `system.access.column_lineage` — the Unity Catalog source of truth. No inference, no heuristics, no false positives.
 - **Lineage Status Indicators** — Each node is classified as connected, root (source), leaf (sink), or orphan (no lineage). Orphan nodes get an amber border and a tooltip explaining the status. A banner at the top shows the count of orphan tables with a link to UC lineage limitations.
 - **Request Coalescing** — Single-flight pattern prevents thundering herd: 4,000 simultaneous requests generate only 1 DBSQL query
-- **Staggered Reveal Animation** — Nodes cascade left-to-right after layout, edges appear when both endpoints are visible
 - **Orphan Node Layout** — Tables with no lineage are laid out in a separate section below the DAG, spaced by name length to avoid overlap
 - **Search** — Cmd+K to search tables/views
 - **Interactive** — Drag nodes, zoom/pan, hover tooltips, node highlighting with upstream/downstream paths
-- **Reset Layout** — Re-run ELK and replay reveal animation after dragging nodes
 
 ---
 
