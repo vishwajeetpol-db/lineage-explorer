@@ -201,9 +201,7 @@ Lineage data comes exclusively from Unity Catalog system tables — the source o
 - **`system.access.table_lineage`** — Table-to-table data flow relationships
 - **`system.access.column_lineage`** — Column-level data flow relationships
 
-There are no inference strategies, no regex parsing, no heuristics, and no guessing. If Unity Catalog has captured a lineage relationship from a query that was actually executed, it shows up. If not, it doesn't. This means zero false positives.
-
-The system tables require `SELECT` on `system.access` — this is included in the required grants above. These grants on the `system` catalog must be issued by an **account admin** (see [System tables](https://docs.databricks.com/aws/en/admin/system-tables/)). In many workspaces, `account users` already has these privileges, in which case explicit grants are not needed. The lineage system tables are populated automatically by Unity Catalog when queries (CTAS, INSERT, MERGE, etc.) are executed against tables in the catalog.
+There are no inference strategies, no regex parsing, no heuristics, and no guessing. If Unity Catalog has captured a lineage relationship from a query that was actually executed, it shows up. If not, it doesn't. This means zero false positives. The lineage system tables are populated automatically by Unity Catalog when queries (CTAS, INSERT, MERGE, etc.) are executed against tables in the catalog.
 
 **Note**: There are scenarios where data flow exists but lineage is not captured in system tables (e.g., path-based access, RDD operations, renamed objects, certain DLT patterns). These are Unity Catalog platform limitations, not Lineage Explorer limitations. For the current list of known gaps and supported compute types, refer to the official Databricks documentation:
 - [View data lineage using Unity Catalog](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-lineage)
