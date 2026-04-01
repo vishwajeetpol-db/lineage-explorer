@@ -233,9 +233,6 @@ function LineageCanvas() {
       setFlowEdges(revealEdges);
       setRevealCounter(-1);
 
-      setTimeout(() => {
-        reactFlowInstance.fitView({ padding: 0.15, duration: 400 });
-      }, 50);
     });
     // expandedNodes is intentionally NOT in the dependency array.
     // Expand/collapse is handled by a separate effect below.
@@ -282,7 +279,7 @@ function LineageCanvas() {
       // which can miscalculate the bounding box on large graphs (20+ nodes).
       setTimeout(() => {
         reactFlowInstance.fitView({ padding: 0.15, duration: 400 });
-      }, 100);
+      }, 150);
       return;
     }
 
@@ -487,8 +484,6 @@ function LineageCanvas() {
         onPaneClick={handlePaneClick}
         onNodeClick={handleNodeClick}
         nodesDraggable
-        fitView
-        fitViewOptions={{ padding: 0.15 }}
         minZoom={0.1}
         maxZoom={3}
         proOptions={{ hideAttribution: true }}
