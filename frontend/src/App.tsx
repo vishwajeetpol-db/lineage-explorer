@@ -102,6 +102,15 @@ export default function App() {
     }
   }, [liveMode, setLineageData, setError]);
 
+  // Re-fetch lineage immediately when live mode is toggled (if a table is already selected)
+  const prevLiveMode = useRef(liveMode);
+  useEffect(() => {
+    if (prevLiveMode.current !== liveMode && focusTable && catalog && schema) {
+      fetchLineage(catalog, schema);
+    }
+    prevLiveMode.current = liveMode;
+  }, [liveMode, focusTable, catalog, schema, fetchLineage]);
+
   const handleSelectTable = useCallback((fqdn: string) => {
     setFocusTable(fqdn);
     const parts = fqdn.split(".");
