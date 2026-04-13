@@ -1,18 +1,26 @@
 import { create } from "zustand";
-import type { TableNode, LineageEdge, ColumnLineageEdge } from "../api/client";
+import type { GraphNode, LineageEdge, ColumnLineageEdge, TableSearchItem } from "../api/client";
 
 interface LineageState {
+  // Table-focused landing
+  focusTable: string | null; // FQDN of selected table
+  allTables: TableSearchItem[];
+  allTablesLoading: boolean;
+
   // Selectors
   catalog: string;
   schema: string;
+  lineageView: "pipeline" | "table" | "full";
+  lineageDepth: number; // 0 = full lineage, >0 = N hops upstream + N hops downstream
   columnLineageEnabled: boolean;
   liveMode: boolean;
   isAdmin: boolean;
+  discountPercent: number;
 
   // Data
   catalogs: string[];
   schemas: string[];
-  nodes: TableNode[];
+  nodes: GraphNode[];
   edges: LineageEdge[];
   columnEdges: ColumnLineageEdge[];
 
@@ -33,14 +41,20 @@ interface LineageState {
   searchOpen: boolean;
 
   // Actions
+  setFocusTable: (fqdn: string | null) => void;
+  setAllTables: (tables: TableSearchItem[]) => void;
+  setAllTablesLoading: (loading: boolean) => void;
   setCatalog: (catalog: string) => void;
   setSchema: (schema: string) => void;
+  setLineageView: (view: "pipeline" | "table" | "full") => void;
+  setLineageDepth: (depth: number) => void;
   setColumnLineageEnabled: (enabled: boolean) => void;
   setLiveMode: (live: boolean) => void;
   setIsAdmin: (isAdmin: boolean) => void;
+  setDiscountPercent: (percent: number) => void;
   setCatalogs: (catalogs: string[]) => void;
   setSchemas: (schemas: string[]) => void;
-  setLineageData: (nodes: TableNode[], edges: LineageEdge[], cached?: boolean, cachedAt?: string | null, cacheExpiresAt?: string | null, fetchDurationMs?: number | null) => void;
+  setLineageData: (nodes: GraphNode[], edges: LineageEdge[], cached?: boolean, cachedAt?: string | null, cacheExpiresAt?: string | null, fetchDurationMs?: number | null) => void;
   setColumnEdges: (edges: ColumnLineageEdge[]) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
@@ -54,11 +68,17 @@ interface LineageState {
 }
 
 export const useLineageStore = create<LineageState>((set) => ({
+  focusTable: null,
+  allTables: [],
+  allTablesLoading: false,
   catalog: "",
   schema: "",
+  lineageView: "full",
+  lineageDepth: 0,
   columnLineageEnabled: false,
   liveMode: false,
   isAdmin: false,
+  discountPercent: 0,
   catalogs: [],
   schemas: [],
   nodes: [],
@@ -77,11 +97,24 @@ export const useLineageStore = create<LineageState>((set) => ({
   searchQuery: "",
   searchOpen: false,
 
+  setFocusTable: (fqdn) => {
+    if (!fqdn) {
+      set({ focusTable: null, catalog: "", schema: "", nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null, cached: false, cachedAt: null, cacheExpiresAt: null, fetchDurationMs: null });
+    } else {
+      const parts = fqdn.split(".");
+      set({ focusTable: fqdn, catalog: parts[0], schema: parts[1] });
+    }
+  },
+  setAllTables: (tables) => set({ allTables: tables, allTablesLoading: false }),
+  setAllTablesLoading: (loading) => set({ allTablesLoading: loading }),
   setCatalog: (catalog) => set({ catalog, schema: "", schemas: [], nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null, cached: false, cachedAt: null, cacheExpiresAt: null, fetchDurationMs: null }),
   setSchema: (schema) => set({ schema, nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null, cached: false, cachedAt: null, cacheExpiresAt: null, fetchDurationMs: null }),
+  setLineageView: (view) => set({ lineageView: view, columnEdges: [], selectedColumn: null, expandedNodes: new Set() }),
+  setLineageDepth: (depth) => set({ lineageDepth: depth }),
   setColumnLineageEnabled: (enabled) => set({ columnLineageEnabled: enabled, columnEdges: [], selectedColumn: null, expandedNodes: new Set() }),
   setLiveMode: (live) => set({ liveMode: live }),
   setIsAdmin: (isAdmin) => set({ isAdmin }),
+  setDiscountPercent: (percent) => set({ discountPercent: Math.max(0, Math.min(99, percent)) }),
   setCatalogs: (catalogs) => set({ catalogs }),
   setSchemas: (schemas) => set({ schemas }),
   setLineageData: (nodes, edges, cached, cachedAt, cacheExpiresAt, fetchDurationMs) => set({ nodes, edges, loading: false, error: null, cached: cached ?? false, cachedAt: cachedAt ?? null, cacheExpiresAt: cacheExpiresAt ?? null, fetchDurationMs: fetchDurationMs ?? null }),

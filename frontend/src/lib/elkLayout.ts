@@ -8,6 +8,8 @@ const COMPACT_HEIGHT = 52;
 const EXPANDED_BASE_HEIGHT = 56;
 const COLUMN_ROW_HEIGHT = 28;
 const EXPANDED_WIDTH = 320;
+const ENTITY_WIDTH = 200;
+const ENTITY_HEIGHT = 44;
 
 export interface LayoutResult {
   nodes: Node[];
@@ -30,6 +32,9 @@ export async function layoutGraph(
   const orphanNodes = nodes.filter((n) => !connectedIds.has(n.id));
 
   function toElkNode(node: Node) {
+    if (node.data?.node_type === "entity") {
+      return { id: node.id, width: ENTITY_WIDTH, height: ENTITY_HEIGHT };
+    }
     const isExpanded = expandedNodes.has(node.id);
     const columnCount = node.data?.columns?.length || 0;
     const width = isExpanded ? EXPANDED_WIDTH : COMPACT_WIDTH;
@@ -51,8 +56,8 @@ export async function layoutGraph(
     layoutOptions: {
       "elk.algorithm": "layered",
       "elk.direction": "RIGHT",
-      "elk.spacing.nodeNode": "50",
-      "elk.layered.spacing.nodeNodeBetweenLayers": "100",
+      "elk.spacing.nodeNode": "60",
+      "elk.layered.spacing.nodeNodeBetweenLayers": "160",
       "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
       "elk.layered.crossingMinimization.greedySwitch.type": "TWO_SIDED",
       "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",

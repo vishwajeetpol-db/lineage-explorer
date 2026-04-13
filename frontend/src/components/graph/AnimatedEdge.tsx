@@ -10,7 +10,7 @@ function AnimatedEdge({
   sourcePosition,
   targetPosition,
   data,
-}: EdgeProps<{ isHighlighted: boolean; isDimmed: boolean; isColumnEdge: boolean; isVisible?: boolean }>) {
+}: EdgeProps<{ isHighlighted: boolean; isDimmed: boolean; isColumnEdge: boolean; isVisible?: boolean; isPipelineEdge?: boolean }>) {
   if (data?.isVisible === false) return null;
 
   const [edgePath] = getBezierPath({
@@ -26,6 +26,7 @@ function AnimatedEdge({
   const isHighlighted = data?.isHighlighted ?? false;
   const isDimmed = data?.isDimmed ?? false;
   const isColumnEdge = data?.isColumnEdge ?? false;
+  const isPipelineEdge = data?.isPipelineEdge ?? false;
 
   if (isColumnEdge) {
     return (
@@ -65,6 +66,32 @@ function AnimatedEdge({
         strokeWidth={1}
         style={{ opacity: 0.3, transition: "all 0.4s ease" }}
       />
+    );
+  }
+
+  // Pipeline edge: orange glow + traveling dot
+  if (isPipelineEdge) {
+    return (
+      <g>
+        <path
+          d={edgePath}
+          fill="none"
+          stroke="rgba(245,158,11,0.12)"
+          strokeWidth={10}
+          style={{ filter: "blur(6px)" }}
+        />
+        <path
+          id={id}
+          d={edgePath}
+          fill="none"
+          stroke="#F59E0B"
+          strokeWidth={2}
+          style={{ transition: "all 0.4s ease" }}
+        />
+        <circle r={2.5} fill="#FBBF24" filter="drop-shadow(0 0 3px rgba(245,158,11,0.8))">
+          <animateMotion dur="1.5s" repeatCount="indefinite" path={edgePath} />
+        </circle>
+      </g>
     );
   }
 

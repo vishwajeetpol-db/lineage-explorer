@@ -1,7 +1,7 @@
-import { memo, useCallback, useMemo } from "react";
+import { memo, useCallback, useMemo, useRef } from "react";
 import { Handle, Position, type NodeProps } from "reactflow";
 import { motion, AnimatePresence } from "framer-motion";
-import { Database, Eye, Layers, ChevronDown, Key } from "lucide-react";
+import { Database, Eye, Layers, ChevronDown, Key, ExternalLink } from "lucide-react";
 import { useLineageStore } from "../../store/lineageStore";
 import type { TableNode as TableNodeType } from "../../api/client";
 
@@ -11,6 +11,7 @@ const typeConfig: Record<string, { color: string; bg: string; border: string; ic
   EXTERNAL: { color: "text-blue-400", bg: "bg-blue-500/10", border: "border-blue-500/25", icon: Database, label: "TABLE", dot: "bg-blue-400" },
   VIEW: { color: "text-emerald-400", bg: "bg-emerald-500/10", border: "border-emerald-500/25", icon: Eye, label: "VIEW", dot: "bg-emerald-400" },
   MATERIALIZED_VIEW: { color: "text-amber-400", bg: "bg-amber-500/10", border: "border-amber-500/25", icon: Layers, label: "MAT VIEW", dot: "bg-amber-400" },
+  EXTERNAL_LINEAGE: { color: "text-cyan-400", bg: "bg-cyan-500/10", border: "border-cyan-500/25", icon: ExternalLink, label: "CROSS-SCHEMA", dot: "bg-cyan-400" },
 };
 
 function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded: boolean; isSelected: boolean; isHighlighted: boolean; isDimmed: boolean; isRevealed?: boolean }>) {
@@ -22,6 +23,7 @@ function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded
   const isDimmed = data.isDimmed;
   const isRevealed = data.isRevealed ?? true;
   const isOrphan = data.lineage_status === "orphan";
+  const isCrossSchema = data.table_type === "EXTERNAL_LINEAGE";
 
   const handleNodeClick = useCallback(() => {
     if (columnLineageEnabled) {
@@ -41,7 +43,8 @@ function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded
     [id, selectedColumn, setSelectedColumn]
   );
 
-  const columns = useMemo(() => data.columns || [], [data.columns]);
+  const columns: { name: string; type: string; nullable: boolean }[] = useMemo(() => data.columns || [], [data.columns]);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout>>();
 
   return (
     <motion.div
@@ -55,21 +58,24 @@ function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded
         relative rounded-2xl border transition-all duration-300
         ${isSelected
           ? "border-accent/60 shadow-[0_0_0_1px_rgba(99,102,241,0.3),0_0_30px_rgba(99,102,241,0.15),0_8px_32px_rgba(0,0,0,0.5)]"
-          : isOrphan
-            ? "border-amber-500/30 shadow-[0_4px_24px_rgba(0,0,0,0.4)] hover:border-amber-500/50"
-            : "border-white/[0.06] hover:border-white/[0.12] shadow-[0_4px_24px_rgba(0,0,0,0.4)] hover:shadow-[0_8px_40px_rgba(0,0,0,0.5)]"
+          : isCrossSchema
+            ? "border-cyan-500/40 border-dashed shadow-[0_4px_24px_rgba(0,0,0,0.4)] hover:border-cyan-500/60"
+            : isOrphan
+              ? "border-amber-500/30 shadow-[0_4px_24px_rgba(0,0,0,0.4)] hover:border-amber-500/50"
+              : "border-white/[0.06] hover:border-white/[0.12] shadow-[0_4px_24px_rgba(0,0,0,0.4)] hover:shadow-[0_8px_40px_rgba(0,0,0,0.5)]"
         }
         ${isDimmed ? "pointer-events-none" : "cursor-pointer"}
         bg-gradient-to-b from-[#161625] to-[#12121E]
       `}
       onClick={handleNodeClick}
-      onMouseEnter={() => setHoveredNode(id)}
-      onMouseLeave={() => setHoveredNode(null)}
+      onMouseEnter={() => { clearTimeout(hoverTimer.current); hoverTimer.current = setTimeout(() => setHoveredNode(id), 80); }}
+      onMouseLeave={() => { clearTimeout(hoverTimer.current); setHoveredNode(null); }}
     >
-      {/* Left handle */}
+      {/* Left handle — table-level target */}
       <Handle
         type="target"
         position={Position.Left}
+        id={`${id}__table__target`}
         className="!w-3 !h-3 !rounded-full !bg-[#1E1E2E] !border-2 !border-white/10 hover:!border-accent/60 !-left-[7px] !transition-colors !duration-200"
       />
 
@@ -171,10 +177,11 @@ function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded
         )}
       </AnimatePresence>
 
-      {/* Right handle */}
+      {/* Right handle — table-level source */}
       <Handle
         type="source"
         position={Position.Right}
+        id={`${id}__table__source`}
         className="!w-3 !h-3 !rounded-full !bg-[#1E1E2E] !border-2 !border-white/10 hover:!border-accent/60 !-right-[7px] !transition-colors !duration-200"
       />
     </motion.div>

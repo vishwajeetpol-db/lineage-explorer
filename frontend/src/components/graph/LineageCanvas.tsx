@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { TableNode } from "../../api/client";
 import ReactFlow, {
   Background,
   BackgroundVariant,
@@ -17,9 +18,11 @@ import "reactflow/dist/style.css";
 import { AnimatePresence, motion } from "framer-motion";
 import { RotateCcw } from "lucide-react";
 import { useLineageStore } from "../../store/lineageStore";
+import { api } from "../../api/client";
 import { layoutGraph } from "../../lib/elkLayout";
 
 import TableNodeComponent from "./TableNode";
+import EntityNodeComponent from "./EntityNode";
 import AnimatedEdge from "./AnimatedEdge";
 import TableTooltip from "../ui/TableTooltip";
 import SearchDialog from "../ui/SearchDialog";
@@ -27,6 +30,7 @@ import Skeleton from "../ui/Skeleton";
 
 const nodeTypes: NodeTypes = {
   tableNode: TableNodeComponent,
+  entityNode: EntityNodeComponent,
 };
 
 const edgeTypes: EdgeTypes = {
@@ -35,8 +39,11 @@ const edgeTypes: EdgeTypes = {
 
 function LineageCanvas() {
   const {
-    nodes: rawNodes,
-    edges: rawEdges,
+    nodes: allNodes,
+    edges: allEdges,
+    focusTable,
+    lineageView,
+    lineageDepth,
     columnEdges,
     expandedNodes,
     selectedNode,
@@ -50,10 +57,149 @@ function LineageCanvas() {
     setColumnEdges,
   } = useLineageStore();
 
+  // Subgraph extraction: when focusTable is set, show only its lineage path.
+  // lineageDepth controls how many table-to-table hops to show (0 = full).
+  // Entity nodes are transparent — they don't count as a hop.
+  const { rawNodes, rawEdges } = useMemo(() => {
+    if (!focusTable || allNodes.length === 0) return { rawNodes: allNodes, rawEdges: allEdges };
+
+    const isEntity = (id: string) => id.startsWith("entity:");
+    const maxDepth = lineageDepth > 0 ? lineageDepth : Infinity;
+
+    // Build adjacency from full schema edges
+    const upstream = new Map<string, string[]>();
+    const downstream = new Map<string, string[]>();
+    for (const e of allEdges) {
+      if (!upstream.has(e.target)) upstream.set(e.target, []);
+      upstream.get(e.target)!.push(e.source);
+      if (!downstream.has(e.source)) downstream.set(e.source, []);
+      downstream.get(e.source)!.push(e.target);
+    }
+
+    // Depth-limited BFS — entity nodes are transparent (depth only increments on table hops)
+    const connected = new Set<string>();
+    connected.add(focusTable);
+
+    // Trace upstream — stop exploring beyond a table at maxDepth
+    const visitedUp = new Set<string>();
+    const qUp: [string, number][] = [[focusTable, 0]];
+    while (qUp.length > 0) {
+      const [node, depth] = qUp.shift()!;
+      if (visitedUp.has(node)) continue;
+      visitedUp.add(node);
+      connected.add(node);
+      // If this is a table at max depth, don't explore further
+      if (!isEntity(node) && depth >= maxDepth) continue;
+      for (const src of upstream.get(node) || []) {
+        if (!visitedUp.has(src)) {
+          const nextDepth = isEntity(src) ? depth : depth + 1;
+          if (nextDepth <= maxDepth) qUp.push([src, nextDepth]);
+        }
+      }
+    }
+
+    // Trace downstream — stop exploring beyond a table at maxDepth
+    const visitedDown = new Set<string>();
+    const qDown: [string, number][] = [[focusTable, 0]];
+    while (qDown.length > 0) {
+      const [node, depth] = qDown.shift()!;
+      if (visitedDown.has(node)) continue;
+      visitedDown.add(node);
+      connected.add(node);
+      // If this is a table at max depth, don't explore further
+      if (!isEntity(node) && depth >= maxDepth) continue;
+      for (const tgt of downstream.get(node) || []) {
+        if (!visitedDown.has(tgt)) {
+          const nextDepth = isEntity(tgt) ? depth : depth + 1;
+          if (nextDepth <= maxDepth) qDown.push([tgt, nextDepth]);
+        }
+      }
+    }
+
+    const filteredNodes = allNodes.filter((n) => connected.has(n.id));
+    const filteredEdges = allEdges.filter((e) => connected.has(e.source) && connected.has(e.target));
+    return { rawNodes: filteredNodes, rawEdges: filteredEdges };
+  }, [allNodes, allEdges, focusTable, lineageDepth]);
+
+  // Apply view mode filter on top of subgraph extraction
+  const { viewNodes, viewEdges } = useMemo(() => {
+    const isEntity = (id: string) => id.startsWith("entity:");
+
+    if (lineageView === "table") {
+      // Table-only: remove entity nodes, use directTableEdges
+      const tableNodes = rawNodes.filter((n) => n.node_type !== "entity");
+      // Collapse entity edges into direct table→table
+      const entitySources = new Map<string, Set<string>>();
+      const entityTargets = new Map<string, Set<string>>();
+      const directEdges: { source: string; target: string }[] = [];
+      const edgeSet = new Set<string>();
+
+      for (const e of rawEdges) {
+        if (!isEntity(e.source) && !isEntity(e.target)) {
+          const k = `${e.source}|${e.target}`;
+          if (!edgeSet.has(k)) { edgeSet.add(k); directEdges.push(e); }
+        } else if (!isEntity(e.source) && isEntity(e.target)) {
+          if (!entitySources.has(e.target)) entitySources.set(e.target, new Set());
+          entitySources.get(e.target)!.add(e.source);
+        } else if (isEntity(e.source) && !isEntity(e.target)) {
+          if (!entityTargets.has(e.source)) entityTargets.set(e.source, new Set());
+          entityTargets.get(e.source)!.add(e.target);
+        }
+      }
+      for (const [eid, sources] of entitySources) {
+        const targets = entityTargets.get(eid) || new Set();
+        for (const s of sources) {
+          for (const t of targets) {
+            if (s === t) continue;
+            const k = `${s}|${t}`;
+            if (!edgeSet.has(k)) { edgeSet.add(k); directEdges.push({ source: s, target: t }); }
+          }
+        }
+      }
+      return { viewNodes: tableNodes, viewEdges: directEdges };
+    }
+
+    if (lineageView === "pipeline") {
+      // Pipeline-only: show entity nodes with dependencies derived from shared tables
+      const entityNodes = rawNodes.filter((n) => n.node_type === "entity");
+      // Build: entity → writes (target tables), entity → reads (source tables)
+      const entityWrites = new Map<string, Set<string>>(); // entity → tables it writes
+      const entityReads = new Map<string, Set<string>>();  // entity → tables it reads
+      for (const e of rawEdges) {
+        if (!isEntity(e.source) && isEntity(e.target)) {
+          // table → entity: entity READS this table
+          if (!entityReads.has(e.target)) entityReads.set(e.target, new Set());
+          entityReads.get(e.target)!.add(e.source);
+        } else if (isEntity(e.source) && !isEntity(e.target)) {
+          // entity → table: entity WRITES this table
+          if (!entityWrites.has(e.source)) entityWrites.set(e.source, new Set());
+          entityWrites.get(e.source)!.add(e.target);
+        }
+      }
+      // If entity A writes table T and entity B reads table T, then A → B
+      const pipelineEdges: { source: string; target: string }[] = [];
+      const peSet = new Set<string>();
+      for (const [writerEntity, writtenTables] of entityWrites) {
+        for (const table of writtenTables) {
+          for (const [readerEntity, readTables] of entityReads) {
+            if (readerEntity !== writerEntity && readTables.has(table)) {
+              const k = `${writerEntity}|${readerEntity}`;
+              if (!peSet.has(k)) { peSet.add(k); pipelineEdges.push({ source: writerEntity, target: readerEntity }); }
+            }
+          }
+        }
+      }
+      return { viewNodes: entityNodes, viewEdges: pipelineEdges };
+    }
+
+    // "full" mode — both tables and entities as-is
+    return { viewNodes: rawNodes, viewEdges: rawEdges };
+  }, [rawNodes, rawEdges, lineageView]);
+
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
   const [flowEdges, setFlowEdges] = useState<Edge[]>([]);
   const [tooltipData, setTooltipData] = useState<{
-    node: (typeof rawNodes)[0];
+    node: TableNode;
     position: { x: number; y: number };
   } | null>(null);
   const [revealCounter, setRevealCounter] = useState(-1);
@@ -76,40 +222,56 @@ function LineageCanvas() {
   const adjacency = useMemo(() => {
     const upstream = new Map<string, string[]>();  // target -> sources
     const downstream = new Map<string, string[]>(); // source -> targets
-    for (const e of rawEdges) {
+    for (const e of viewEdges) {
       if (!upstream.has(e.target)) upstream.set(e.target, []);
       upstream.get(e.target)!.push(e.source);
       if (!downstream.has(e.source)) downstream.set(e.source, []);
       downstream.get(e.source)!.push(e.target);
     }
     return { upstream, downstream };
-  }, [rawEdges]);
+  }, [viewEdges]);
 
   // Compute connected nodes for highlighting using adjacency maps
+  // Entity nodes: one-hop only (source tables + target tables)
+  // Table nodes: full transitive traversal
+  const isEntityScope = (selectedNode || hoveredNode || "").startsWith("entity:");
+
   const connectedNodes = useMemo(() => {
     if (!selectedNode && !hoveredNode) return new Set<string>();
     const target = selectedNode || hoveredNode;
     const connected = new Set<string>();
     if (target) {
       connected.add(target);
-      const findUpstream = (nodeId: string) => {
-        for (const src of adjacency.upstream.get(nodeId) || []) {
-          if (!connected.has(src)) {
-            connected.add(src);
-            findUpstream(src);
-          }
+
+      if (target.startsWith("entity:")) {
+        // Entity node: one hop only — direct source and target tables
+        for (const src of adjacency.upstream.get(target) || []) {
+          connected.add(src);
         }
-      };
-      const findDownstream = (nodeId: string) => {
-        for (const tgt of adjacency.downstream.get(nodeId) || []) {
-          if (!connected.has(tgt)) {
-            connected.add(tgt);
-            findDownstream(tgt);
-          }
+        for (const tgt of adjacency.downstream.get(target) || []) {
+          connected.add(tgt);
         }
-      };
-      findUpstream(target);
-      findDownstream(target);
+      } else {
+        // Table node: full transitive traversal
+        const findUpstream = (nodeId: string) => {
+          for (const src of adjacency.upstream.get(nodeId) || []) {
+            if (!connected.has(src)) {
+              connected.add(src);
+              findUpstream(src);
+            }
+          }
+        };
+        const findDownstream = (nodeId: string) => {
+          for (const tgt of adjacency.downstream.get(nodeId) || []) {
+            if (!connected.has(tgt)) {
+              connected.add(tgt);
+              findDownstream(tgt);
+            }
+          }
+        };
+        findUpstream(target);
+        findDownstream(target);
+      }
     }
     return connected;
   }, [selectedNode, hoveredNode, adjacency]);
@@ -117,79 +279,105 @@ function LineageCanvas() {
   const connectedEdges = useMemo(() => {
     if (!selectedNode && !hoveredNode) return new Set<string>();
     const edgeSet = new Set<string>();
-    rawEdges.forEach((e) => {
+    viewEdges.forEach((e) => {
       if (connectedNodes.has(e.source) && connectedNodes.has(e.target)) {
         edgeSet.add(`${e.source}->${e.target}`);
       }
     });
     return edgeSet;
-  }, [connectedNodes, rawEdges, selectedNode, hoveredNode]);
+  }, [connectedNodes, viewEdges, selectedNode, hoveredNode]);
 
-  // Compute column lineage client-side with full transitive traversal
+  // Schema-level column lineage from system.access.column_lineage.
+  // Fetched once per schema (cached server-side), then transitive traversal
+  // runs client-side on real UC column edges — not name-matching heuristics.
+  const [schemaColEdges, setSchemaColEdges] = useState<{ source_table: string; source_column: string; target_table: string; target_column: string }[]>([]);
+
+  // Fetch all column edges for the schema when column mode is enabled
   useEffect(() => {
-    if (!selectedColumn) {
+    if (!columnLineageEnabled || !focusTable) {
+      setSchemaColEdges([]);
+      return;
+    }
+    const parts = focusTable.split(".");
+    if (parts.length !== 3) return;
+
+    let cancelled = false;
+    api.getSchemaColumnLineage(parts[0], parts[1])
+      .then((resp) => { if (!cancelled) setSchemaColEdges(resp.edges); })
+      .catch(() => { if (!cancelled) setSchemaColEdges([]); });
+    return () => { cancelled = true; };
+  }, [columnLineageEnabled, focusTable]);
+
+  // Build adjacency maps for O(1) column lineage traversal (computed once when edges change)
+  const colAdjacency = useMemo(() => {
+    // target "table.col" → list of edges feeding into it
+    const upstream = new Map<string, typeof schemaColEdges>();
+    // source "table.col" → list of edges flowing out of it
+    const downstream = new Map<string, typeof schemaColEdges>();
+    for (const e of schemaColEdges) {
+      const tgtKey = `${e.target_table}.${e.target_column.toLowerCase()}`;
+      const srcKey = `${e.source_table}.${e.source_column.toLowerCase()}`;
+      if (!upstream.has(tgtKey)) upstream.set(tgtKey, []);
+      upstream.get(tgtKey)!.push(e);
+      if (!downstream.has(srcKey)) downstream.set(srcKey, []);
+      downstream.get(srcKey)!.push(e);
+    }
+    return { upstream, downstream };
+  }, [schemaColEdges]);
+
+  // Transitive column trace on real UC edges via adjacency maps (O(1) per hop)
+  useEffect(() => {
+    if (!selectedColumn || schemaColEdges.length === 0) {
       setColumnEdges([]);
       return;
     }
     const { table: selTable, column: selCol } = selectedColumn;
-    const colLower = selCol.toLowerCase();
-    const inferred: { source_table: string; source_column: string; target_table: string; target_column: string }[] = [];
-    const edgesSeen = new Set<string>();
+    const result: typeof schemaColEdges = [];
+    const seen = new Set<string>();
 
-    const colsByTable = new Map<string, Set<string>>();
-    for (const node of rawNodes) {
-      colsByTable.set(node.id, new Set(node.columns.map((c) => c.name.toLowerCase())));
-    }
-
-    const addEdge = (src: string, tgt: string) => {
-      const key = `${src}|${tgt}`;
-      if (edgesSeen.has(key)) return;
-      edgesSeen.add(key);
-      inferred.push({ source_table: src, source_column: selCol, target_table: tgt, target_column: selCol });
-    };
-
-    const traceUpstream = (tableId: string, visited: Set<string>) => {
-      if (visited.has(tableId)) return;
-      visited.add(tableId);
-      for (const edge of rawEdges) {
-        if (edge.target === tableId && colsByTable.get(edge.source)?.has(colLower)) {
-          addEdge(edge.source, tableId);
-          traceUpstream(edge.source, visited);
+    const traceUpstream = (tbl: string, col: string) => {
+      const key = `${tbl}.${col.toLowerCase()}`;
+      for (const e of colAdjacency.upstream.get(key) || []) {
+        const edgeKey = `${e.source_table}.${e.source_column}|${e.target_table}.${e.target_column}`;
+        if (!seen.has(edgeKey)) {
+          seen.add(edgeKey);
+          result.push(e);
+          traceUpstream(e.source_table, e.source_column);
         }
       }
     };
 
-    const traceDownstream = (tableId: string, visited: Set<string>) => {
-      if (visited.has(tableId)) return;
-      visited.add(tableId);
-      for (const edge of rawEdges) {
-        if (edge.source === tableId && colsByTable.get(edge.target)?.has(colLower)) {
-          addEdge(tableId, edge.target);
-          traceDownstream(edge.target, visited);
+    const traceDownstream = (tbl: string, col: string) => {
+      const key = `${tbl}.${col.toLowerCase()}`;
+      for (const e of colAdjacency.downstream.get(key) || []) {
+        const edgeKey = `${e.source_table}.${e.source_column}|${e.target_table}.${e.target_column}`;
+        if (!seen.has(edgeKey)) {
+          seen.add(edgeKey);
+          result.push(e);
+          traceDownstream(e.target_table, e.target_column);
         }
       }
     };
 
-    traceUpstream(selTable, new Set<string>());
-    traceDownstream(selTable, new Set<string>());
-
-    setColumnEdges(inferred);
-  }, [selectedColumn, rawNodes, rawEdges, setColumnEdges]);
+    traceUpstream(selTable, selCol);
+    traceDownstream(selTable, selCol);
+    setColumnEdges(result);
+  }, [selectedColumn, schemaColEdges, colAdjacency, setColumnEdges]);
 
   // =========================================================================
   // LAYOUT EFFECT — runs ONLY when raw data changes or reset is pressed.
   // NEVER runs on expand/collapse (expandedNodes is NOT a dependency).
   // =========================================================================
   useEffect(() => {
-    if (rawNodes.length === 0) {
+    if (viewNodes.length === 0) {
       setFlowNodes([]);
       setFlowEdges([]);
       return;
     }
 
-    const rfNodes: Node[] = rawNodes.map((n) => ({
+    const rfNodes: Node[] = viewNodes.map((n) => ({
       id: n.id,
-      type: "tableNode",
+      type: n.node_type === "entity" ? "entityNode" : "tableNode",
       position: { x: 0, y: 0 },
       data: {
         ...n,
@@ -200,44 +388,72 @@ function LineageCanvas() {
       },
     }));
 
-    const rfEdges: Edge[] = rawEdges.map((e) => ({
+    const isEntity = (id: string) => id.startsWith("entity:");
+    const rfEdges: Edge[] = viewEdges.map((e) => ({
       id: `e-${e.source}-${e.target}`,
       source: e.source,
       target: e.target,
+      // Explicit handle IDs prevent React Flow from routing table edges through column handles
+      sourceHandle: isEntity(e.source) ? undefined : `${e.source}__table__source`,
+      targetHandle: isEntity(e.target) ? undefined : `${e.target}__table__target`,
       type: "animated",
       data: { isHighlighted: false, isDimmed: false, isColumnEdge: false, isVisible: true },
     }));
 
     // ELK layout — always uses collapsed dimensions for stable positioning
     layoutGraph(rfNodes, rfEdges, new Set()).then(({ nodes, edges }) => {
-      // Staggered reveal: sort by x-position (left-to-right = topological order)
-      const sorted = [...nodes].sort((a, b) => a.position.x - b.position.x);
-      const orderMap = new Map<string, number>();
-      sorted.forEach((n, i) => orderMap.set(n.id, i));
+      const isLargeGraph = nodes.length > 50;
 
-      const revealNodes = nodes.map((n) => ({
-        ...n,
-        data: {
-          ...n.data,
-          revealOrder: orderMap.get(n.id) ?? 0,
-          isRevealed: false,
-        },
-      }));
+      if (isLargeGraph) {
+        // Large graphs: reveal all at once to avoid 275+ re-render cycles
+        const readyNodes = nodes.map((n) => ({
+          ...n,
+          data: { ...n.data, revealOrder: 0, isRevealed: true },
+        }));
+        const readyEdges = edges.map((e) => ({
+          ...e,
+          data: { ...e.data, isVisible: true },
+        }));
+        setFlowNodes(readyNodes);
+        setFlowEdges(readyEdges);
+        setRevealCounter(Infinity); // skip staggered reveal
+        // React Flow needs time to measure all node dimensions before fitView works.
+        // Retry fitView at increasing intervals to handle slow renders on large graphs.
+        const fitViewRetries = [100, 500, 1000, 2000];
+        fitViewRetries.forEach((delay) => {
+          setTimeout(() => {
+            reactFlowInstance.fitView({ padding: 0.15, duration: 300 });
+          }, delay);
+        });
+      } else {
+        // Small graphs: staggered reveal left-to-right
+        const sorted = [...nodes].sort((a, b) => a.position.x - b.position.x);
+        const orderMap = new Map<string, number>();
+        sorted.forEach((n, i) => orderMap.set(n.id, i));
 
-      const revealEdges = edges.map((e) => ({
-        ...e,
-        data: { ...e.data, isVisible: false },
-      }));
+        const revealNodes = nodes.map((n) => ({
+          ...n,
+          data: {
+            ...n.data,
+            revealOrder: orderMap.get(n.id) ?? 0,
+            isRevealed: false,
+          },
+        }));
 
-      setFlowNodes(revealNodes);
-      setFlowEdges(revealEdges);
-      setRevealCounter(-1);
+        const revealEdges = edges.map((e) => ({
+          ...e,
+          data: { ...e.data, isVisible: false },
+        }));
 
+        setFlowNodes(revealNodes);
+        setFlowEdges(revealEdges);
+        setRevealCounter(-1);
+      }
     });
     // expandedNodes is intentionally NOT in the dependency array.
     // Expand/collapse is handled by a separate effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rawNodes, rawEdges, reactFlowInstance, layoutKey]);
+  }, [viewNodes, viewEdges, reactFlowInstance, layoutKey]);
 
   // =========================================================================
   // EXPAND/COLLAPSE EFFECT — updates node data in place without re-running ELK.
@@ -274,13 +490,21 @@ function LineageCanvas() {
 
     const maxOrder = Math.max(...flowNodes.map((n) => n.data.revealOrder ?? 0), 0);
     if (revealCounter > maxOrder) {
-      // All nodes revealed — re-fit viewport now that nodes are at full scale/opacity.
-      // The initial fitView fires before reveal (nodes at opacity:0/scale:0.95),
-      // which can miscalculate the bounding box on large graphs (20+ nodes).
-      setTimeout(() => {
-        reactFlowInstance.fitView({ padding: 0.15, duration: 400 });
-      }, 150);
-      return;
+      // All nodes revealed — fit viewport after DOM has painted node dimensions.
+      // Double requestAnimationFrame ensures the browser has completed at least
+      // one paint cycle with the revealed nodes before we calculate bounds.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          reactFlowInstance.fitView({ padding: 0.15, duration: 400 });
+        });
+      });
+      // Safety net: if the first fitView fired before React Flow measured all
+      // node dimensions (slow device, large graph), retry after a generous delay.
+      // If the first one succeeded, this is a no-op (viewport already correct).
+      const safetyTimer = setTimeout(() => {
+        reactFlowInstance.fitView({ padding: 0.15, duration: 300 });
+      }, 600);
+      return () => clearTimeout(safetyTimer);
     }
 
     const timer = setInterval(() => {
@@ -309,13 +533,15 @@ function LineageCanvas() {
       }))
     );
 
-    setFlowEdges((prev) =>
-      prev.map((e) => {
-        const currentNodes = flowNodesRef.current;
-        const sourceNode = currentNodes.find((n) => n.id === e.source);
-        const targetNode = currentNodes.find((n) => n.id === e.target);
-        const sourceRevealed = (sourceNode?.data.revealOrder ?? 0) <= revealCounter;
-        const targetRevealed = (targetNode?.data.revealOrder ?? 0) <= revealCounter;
+    setFlowEdges((prev) => {
+      // Build node lookup map once (O(n)) instead of .find() per edge (O(n*m))
+      const nodeOrderMap = new Map<string, number>();
+      for (const n of flowNodesRef.current) {
+        nodeOrderMap.set(n.id, n.data.revealOrder ?? 0);
+      }
+      return prev.map((e) => {
+        const sourceRevealed = (nodeOrderMap.get(e.source) ?? 0) <= revealCounter;
+        const targetRevealed = (nodeOrderMap.get(e.target) ?? 0) <= revealCounter;
         return {
           ...e,
           data: {
@@ -323,8 +549,8 @@ function LineageCanvas() {
             isVisible: sourceRevealed && targetRevealed,
           },
         };
-      })
-    );
+      });
+    });
   }, [revealCounter]);
 
   // Update node/edge styling on select/hover — preserves isVisible and isRevealed
@@ -351,6 +577,7 @@ function LineageCanvas() {
         .map((e) => {
           const edgeKey = `${e.source}->${e.target}`;
           const isHl = !hasHighlight || connectedEdges.has(edgeKey);
+          const isPipelineEdge = isEntityScope && isHl && !!hasHighlight;
           return {
             ...e,
             data: {
@@ -358,6 +585,7 @@ function LineageCanvas() {
               isHighlighted: !!hasHighlight && isHl,
               isDimmed: !!hasHighlight && !isHl,
               isColumnEdge: false,
+              isPipelineEdge,
             },
           };
         });
@@ -380,18 +608,18 @@ function LineageCanvas() {
     });
   }, [selectedNode, hoveredNode, connectedNodes, connectedEdges, columnEdges, selectedColumn]);
 
-  // Tooltip on hover
+  // Tooltip on hover (table nodes only — entity nodes show inline info)
   useEffect(() => {
-    if (hoveredNode && !selectedNode) {
+    if (hoveredNode && !selectedNode && !hoveredNode.startsWith("entity:")) {
       tooltipTimer.current = setTimeout(() => {
-        const node = rawNodes.find((n) => n.id === hoveredNode);
+        const node = viewNodes.find((n) => n.id === hoveredNode);
         const rfNode = flowNodes.find((n) => n.id === hoveredNode);
         if (node && rfNode) {
           const viewportPos = reactFlowInstance.flowToScreenPosition({
             x: rfNode.position.x + 220,
             y: rfNode.position.y,
           });
-          setTooltipData({ node, position: viewportPos });
+          setTooltipData({ node: node as TableNode, position: viewportPos });
         }
       }, 300);
     } else {
@@ -399,7 +627,7 @@ function LineageCanvas() {
       setTooltipData(null);
     }
     return () => clearTimeout(tooltipTimer.current);
-  }, [hoveredNode, selectedNode, rawNodes, flowNodes, reactFlowInstance]);
+  }, [hoveredNode, selectedNode, viewNodes, flowNodes, reactFlowInstance]);
 
   const handlePaneClick = useCallback(() => {
     setSelectedNode(null);
@@ -408,7 +636,9 @@ function LineageCanvas() {
 
   const handleNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
-      if (!columnLineageEnabled) {
+      // Entity nodes are always selectable (pipeline scope highlighting)
+      // Table nodes are selectable only when column lineage is off
+      if (node.id.startsWith("entity:") || !columnLineageEnabled) {
         setSelectedNode(selectedNode === node.id ? null : node.id);
       }
     },
@@ -449,7 +679,7 @@ function LineageCanvas() {
     );
   }
 
-  if (rawNodes.length === 0 && !loading) {
+  if (viewNodes.length === 0 && !loading) {
     return (
       <div className="absolute inset-0 flex items-center justify-center">
         <div className="text-center">

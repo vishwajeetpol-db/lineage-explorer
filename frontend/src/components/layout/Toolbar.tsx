@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useState, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { GitBranch, Search, ChevronDown, Columns3, Zap, Info, Lock, AlertTriangle } from "lucide-react";
+import { GitBranch, Search, ChevronDown, Columns3, Zap, Info, Lock, AlertTriangle, ArrowLeft, Activity, Menu, Percent } from "lucide-react";
 import { useLineageStore } from "../../store/lineageStore";
 import { api, setLiveMode } from "../../api/client";
 
@@ -10,15 +10,16 @@ interface Props {
 
 function Toolbar({ onGenerate }: Props) {
   const {
-    catalog, schema, columnLineageEnabled, liveMode, isAdmin,
+    catalog, schema, focusTable, lineageView, lineageDepth, columnLineageEnabled, liveMode, isAdmin,
     catalogs, schemas, loading, cached, cachedAt, cacheExpiresAt, fetchDurationMs,
-    setCatalog, setSchema, setColumnLineageEnabled, setLiveMode: setStoreLiveMode,
-    setCatalogs, setSchemas, setSearchOpen,
+    setCatalog, setSchema, setFocusTable, setLineageView, setLineageDepth, setColumnLineageEnabled, setLiveMode: setStoreLiveMode,
+    setCatalogs, setSchemas, setSearchOpen, discountPercent, setDiscountPercent,
   } = useLineageStore();
 
   const nodes = useLineageStore((s) => s.nodes);
   const [toast, setToast] = useState<string | null>(null);
-  const orphanCount = useMemo(() => nodes.filter((n) => n.lineage_status === "orphan").length, [nodes]);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const orphanCount = useMemo(() => nodes.filter((n) => n.node_type === "table" && n.lineage_status === "orphan").length, [nodes]);
 
   const handleLiveModeToggle = useCallback(() => {
     if (!isAdmin) {
@@ -91,34 +92,120 @@ function Toolbar({ onGenerate }: Props) {
       {/* Divider */}
       <div className="w-px h-8 bg-white/[0.06]" />
 
-      {/* Catalog */}
-      <SelectBox
-        label="Catalog"
-        value={catalog}
-        options={catalogs}
-        onChange={setCatalog}
-        placeholder="Select catalog"
-      />
+      {/* Back button + focused table */}
+      {focusTable ? (
+        <>
+          <button
+            onClick={() => setFocusTable(null)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.06] hover:border-white/[0.12] transition-all duration-200 group"
+            title="Back to search"
+          >
+            <ArrowLeft size={13} className="text-slate-500 group-hover:text-slate-300 transition-colors" />
+            <span className="text-[11px] text-slate-500 group-hover:text-slate-300 font-medium transition-colors">Back</span>
+          </button>
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-accent/[0.06] border border-accent/20">
+            <div className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_6px] shadow-accent/40" />
+            <span className="font-mono text-[12px] text-accent-light tracking-tight">{focusTable}</span>
+          </div>
+        </>
+      ) : (
+        <>
+          {/* Catalog */}
+          <SelectBox
+            label="Catalog"
+            value={catalog}
+            options={catalogs}
+            onChange={setCatalog}
+            placeholder="Select catalog"
+          />
 
-      {/* Schema */}
-      <SelectBox
-        label="Schema"
-        value={schema}
-        options={schemas}
-        onChange={setSchema}
-        placeholder="Select schema"
-        disabled={!catalog}
-      />
+          {/* Schema */}
+          <SelectBox
+            label="Schema"
+            value={schema}
+            options={schemas}
+            onChange={setSchema}
+            placeholder="Select schema"
+            disabled={!catalog}
+          />
+        </>
+      )}
 
-      {/* Column Lineage */}
-      <div className="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+      {/* View Mode — three-segment slider */}
+      <div className="flex items-center gap-1.5 px-1 py-1 rounded-xl bg-white/[0.02] border border-white/[0.04]">
+        {(["pipeline", "table", "full"] as const).map((mode) => {
+          const isActive = lineageView === mode;
+          const labels = { pipeline: "Pipelines", table: "Tables", full: "Full" };
+          return (
+            <button
+              key={mode}
+              onClick={() => setLineageView(mode)}
+              className={`
+                relative px-3 py-1 rounded-lg text-[10px] font-semibold tracking-wide uppercase
+                transition-all duration-300 ease-out
+                ${isActive
+                  ? "bg-gradient-to-r from-accent/20 to-purple-500/20 text-accent-light shadow-[0_0_8px_rgba(99,102,241,0.15)] border border-accent/30"
+                  : "text-slate-600 hover:text-slate-400 border border-transparent"
+                }
+              `}
+            >
+              {labels[mode]}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Depth control */}
+      {focusTable && (
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+          <span className="text-[11px] text-slate-500 font-medium">Depth</span>
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={2}
+            value={lineageDepth || ""}
+            onChange={(e) => {
+              const raw = e.target.value.replace(/\D/g, "").slice(0, 2);
+              setLineageDepth(raw ? parseInt(raw, 10) : 0);
+            }}
+            placeholder="All"
+            className="w-10 bg-white/[0.04] border border-white/[0.06] rounded-md px-2 py-0.5 text-[11px] font-mono text-slate-300 placeholder:text-slate-600 outline-none focus:border-accent/40 text-center"
+          />
+        </div>
+      )}
+
+      {/* Discount — applies to serverless job costs on pipeline nodes */}
+      {focusTable && (
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+          <Percent size={13} className="text-slate-500" />
+          <span className="text-[11px] text-slate-500 font-medium">Discount</span>
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={2}
+            value={discountPercent || ""}
+            onChange={(e) => {
+              const raw = e.target.value.replace(/\D/g, "").slice(0, 2);
+              setDiscountPercent(raw ? parseInt(raw, 10) : 0);
+            }}
+            placeholder="0"
+            className="w-8 bg-white/[0.04] border border-white/[0.06] rounded-md px-2 py-0.5 text-[11px] font-mono text-slate-300 placeholder:text-slate-600 outline-none focus:border-accent/40 text-center"
+          />
+          <span className="text-[11px] text-slate-600">%</span>
+        </div>
+      )}
+
+      {/* Column Lineage — disabled in pipeline-only mode */}
+      <div className={`flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-white/[0.02] border border-white/[0.04] ${lineageView === "pipeline" ? "opacity-30 pointer-events-none" : ""}`}>
         <Columns3 size={13} className="text-slate-500" />
         <span className="text-[11px] text-slate-500 font-medium">Columns</span>
         <button
-          onClick={() => setColumnLineageEnabled(!columnLineageEnabled)}
+          onClick={() => lineageView !== "pipeline" && setColumnLineageEnabled(!columnLineageEnabled)}
+          disabled={lineageView === "pipeline"}
           className={`
             relative w-8 h-[18px] rounded-full transition-all duration-300
-            ${columnLineageEnabled
+            ${lineageView === "pipeline" ? "cursor-not-allowed" : ""}
+            ${columnLineageEnabled && lineageView !== "pipeline"
               ? "bg-gradient-to-r from-accent to-purple-500 shadow-[0_0_10px_rgba(99,102,241,0.3)]"
               : "bg-white/[0.06]"
             }
@@ -160,29 +247,31 @@ function Toolbar({ onGenerate }: Props) {
         </button>
       </div>
 
-      {/* Generate */}
-      <button
-        onClick={handleGenerate}
-        disabled={!catalog || !schema || loading}
-        className={`
-          relative px-5 py-2 rounded-xl text-[13px] font-semibold transition-all duration-300
-          ${catalog && schema && !loading
-            ? "bg-gradient-to-r from-accent to-purple-500 text-white shadow-[0_0_20px_rgba(99,102,241,0.2)] hover:shadow-[0_0_30px_rgba(99,102,241,0.35)] active:scale-[0.97]"
-            : "bg-white/[0.04] text-slate-600 cursor-not-allowed"
-          }
-        `}
-      >
-        {loading ? (
-          <motion.span
-            animate={{ opacity: [1, 0.4, 1] }}
-            transition={{ duration: 1.2, repeat: Infinity }}
-          >
-            Loading...
-          </motion.span>
-        ) : (
-          "Generate Lineage"
-        )}
-      </button>
+      {/* Generate — only shown when using catalog/schema dropdowns (no focusTable) */}
+      {!focusTable && (
+        <button
+          onClick={handleGenerate}
+          disabled={!catalog || !schema || loading}
+          className={`
+            relative px-5 py-2 rounded-xl text-[13px] font-semibold transition-all duration-300
+            ${catalog && schema && !loading
+              ? "bg-gradient-to-r from-accent to-purple-500 text-white shadow-[0_0_20px_rgba(99,102,241,0.2)] hover:shadow-[0_0_30px_rgba(99,102,241,0.35)] active:scale-[0.97]"
+              : "bg-white/[0.04] text-slate-600 cursor-not-allowed"
+            }
+          `}
+        >
+          {loading ? (
+            <motion.span
+              animate={{ opacity: [1, 0.4, 1] }}
+              transition={{ duration: 1.2, repeat: Infinity }}
+            >
+              Loading...
+            </motion.span>
+          ) : (
+            "Generate Lineage"
+          )}
+        </button>
+      )}
 
       {/* Spacer */}
       <div className="flex-1" />
@@ -203,6 +292,58 @@ function Toolbar({ onGenerate }: Props) {
           </kbd>
         </div>
       </button>
+
+      {/* Burger menu */}
+      <div className="relative">
+        <button
+          onClick={() => setMenuOpen((v) => !v)}
+          className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.06] hover:border-white/[0.12] transition-all duration-200"
+          title="Menu"
+        >
+          <Menu size={15} className="text-slate-400" />
+        </button>
+        <AnimatePresence>
+          {menuOpen && (
+            <>
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[90]"
+                onClick={() => setMenuOpen(false)}
+              />
+              <motion.div
+                initial={{ opacity: 0, y: -4, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -4, scale: 0.96 }}
+                transition={{ duration: 0.15 }}
+                className="absolute right-0 top-full mt-2 z-[100] w-52 rounded-xl bg-[#161625]/95 backdrop-blur-xl border border-white/[0.08] shadow-[0_12px_40px_rgba(0,0,0,0.5)] overflow-hidden"
+              >
+                {isAdmin && (
+                  <a
+                    href="/?admin=true"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setMenuOpen(false)}
+                    className="flex items-center gap-2.5 px-4 py-3 hover:bg-white/[0.04] transition-colors border-b border-white/[0.04]"
+                  >
+                    <Activity size={14} className="text-emerald-400" />
+                    <span className="text-[12px] text-slate-300 font-medium">Admin Dashboard</span>
+                  </a>
+                )}
+                <a
+                  href="/"
+                  onClick={() => setMenuOpen(false)}
+                  className="flex items-center gap-2.5 px-4 py-3 hover:bg-white/[0.04] transition-colors"
+                >
+                  <GitBranch size={14} className="text-accent-light" />
+                  <span className="text-[12px] text-slate-300 font-medium">Table Explorer</span>
+                </a>
+              </motion.div>
+            </>
+          )}
+        </AnimatePresence>
+      </div>
     </motion.header>
     {/* Cache status banner */}
     {nodes.length > 0 && (
@@ -253,8 +394,8 @@ function Toolbar({ onGenerate }: Props) {
       </div>
     )}
 
-    {/* Orphan tables banner */}
-    {orphanCount > 0 && (
+    {/* Orphan tables banner — hidden in focused table mode */}
+    {orphanCount > 0 && !focusTable && (
       <div className="flex items-center justify-center gap-2 px-4 py-1 text-[10px] font-medium tracking-wide bg-amber-500/5 text-amber-400/80 border-b border-amber-500/10">
         <AlertTriangle size={10} className="flex-shrink-0" />
         {orphanCount} {orphanCount === 1 ? "table has" : "tables have"} no lineage recorded — no tracked query has read from or written to {orphanCount === 1 ? "it" : "them"}.
@@ -291,6 +432,7 @@ function Toolbar({ onGenerate }: Props) {
         </motion.div>
       )}
     </AnimatePresence>
+
     </>
   );
 }

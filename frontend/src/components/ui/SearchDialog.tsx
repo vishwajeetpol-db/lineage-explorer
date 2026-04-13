@@ -19,9 +19,10 @@ function SearchDialog({ onSelectNode }: Props) {
   const { searchOpen, setSearchOpen, searchQuery, setSearchQuery, nodes } = useLineageStore();
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const tableNodes = nodes.filter((n) => n.node_type !== "entity");
   const filtered = searchQuery
-    ? nodes.filter((n) => n.name.toLowerCase().includes(searchQuery.toLowerCase()))
-    : nodes;
+    ? tableNodes.filter((n) => n.name.toLowerCase().includes(searchQuery.toLowerCase()))
+    : tableNodes;
 
   useEffect(() => {
     if (searchOpen) {

@@ -33,6 +33,8 @@ targets:
             env:
               - name: DATABRICKS_WAREHOUSE_ID
                 value: ${var.warehouse_id}
+              - name: RATE_LIMIT_MAX_REQUESTS
+                value: "200"
 
   prod:
     mode: production
