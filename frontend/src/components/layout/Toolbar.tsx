@@ -276,21 +276,13 @@ function Toolbar({ onGenerate }: Props) {
       {/* Spacer */}
       <div className="flex-1" />
 
-      {/* Search */}
+      {/* Search — compact icon button */}
       <button
         onClick={() => setSearchOpen(true)}
-        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.04] hover:border-white/[0.08] transition-all duration-200"
+        className="flex items-center justify-center w-8 h-8 flex-shrink-0 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.04] hover:border-white/[0.08] transition-all duration-200"
+        title="Search (Cmd+K)"
       >
-        <Search size={13} className="text-slate-500" />
-        <span className="text-[11px] text-slate-600 font-medium">Search</span>
-        <div className="flex gap-0.5 ml-2">
-          <kbd className="text-[9px] text-slate-600 bg-white/[0.04] px-1.5 py-0.5 rounded font-mono border border-white/[0.06]">
-            Cmd
-          </kbd>
-          <kbd className="text-[9px] text-slate-600 bg-white/[0.04] px-1.5 py-0.5 rounded font-mono border border-white/[0.06]">
-            K
-          </kbd>
-        </div>
+        <Search size={14} className="text-slate-500" />
       </button>
 
       {/* Burger menu */}

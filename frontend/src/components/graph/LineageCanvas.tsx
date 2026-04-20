@@ -116,6 +116,15 @@ function LineageCanvas() {
       }
     }
 
+    // Expand entity neighborhoods: when an entity is discovered (e.g. a pipeline
+    // found via upstream BFS), include ALL its direct neighbors (sources + targets)
+    // so the entity shows full context — not just the path to the focused table.
+    for (const nodeId of [...connected]) {
+      if (!isEntity(nodeId)) continue;
+      for (const src of upstream.get(nodeId) || []) connected.add(src);
+      for (const tgt of downstream.get(nodeId) || []) connected.add(tgt);
+    }
+
     const filteredNodes = allNodes.filter((n) => connected.has(n.id));
     const filteredEdges = allEdges.filter((e) => connected.has(e.source) && connected.has(e.target));
     return { rawNodes: filteredNodes, rawEdges: filteredEdges };

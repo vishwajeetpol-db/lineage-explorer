@@ -418,6 +418,42 @@ def get_table_lineage(catalog: str, schema: str, skip_cache: bool = False) -> Li
         _cache_release(cache_key)
 
 
+def _parse_lineage_ref(table_full_name: str | None, path: str | None, ref_type: str | None) -> tuple[str | None, str | None]:
+    """Parse a lineage source/target into (node_id, node_type).
+
+    Returns a stable node ID and a type string suitable for TableNode.table_type.
+    Handles tables, views, streaming tables, volumes (/Volumes/...), and cloud paths (s3://).
+    """
+    if table_full_name:
+        type_map = {
+            "TABLE": "TABLE",
+            "VIEW": "VIEW",
+            "MATERIALIZED_VIEW": "MATERIALIZED_VIEW",
+            "STREAMING_TABLE": "STREAMING_TABLE",
+        }
+        return table_full_name, type_map.get(ref_type, ref_type or "TABLE")
+
+    if path:
+        # Volume path: /Volumes/catalog/schema/volume_name/...
+        if path.startswith("/Volumes/"):
+            parts = path.split("/")
+            if len(parts) >= 5:
+                vol_id = f"{parts[2]}.{parts[3]}.{parts[4]}"
+                return vol_id, "VOLUME"
+            return f"volume:{path}", "VOLUME"
+
+        # Cloud storage path: s3://bucket/..., abfss://container@account/...
+        if "://" in path:
+            proto, rest = path.split("://", 1)
+            bucket = rest.split("/")[0]
+            return f"path:{proto}://{bucket}", "PATH"
+
+        # Other path
+        return f"path:{path[:80]}", "PATH"
+
+    return None, None
+
+
 def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageResponse:
     """Actual DBSQL fetch — called by at most one thread per cache key at a time."""
     client = _get_client()
@@ -473,11 +509,16 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
     for t in table_rows:
         schema_tables.add(f"{catalog}.{schema}.{t['table_name']}")
 
-    # Get lineage edges from system tables (with entity info for pipeline nodes)
+    # Get lineage edges from system tables (with entity info for pipeline nodes).
+    # Includes PATH entries (volumes, cloud storage) alongside table references.
     lineage_sql = f"""
     SELECT
         source_table_full_name,
         target_table_full_name,
+        source_type,
+        target_type,
+        source_path,
+        target_path,
         entity_type,
         entity_id,
         event_time,
@@ -487,9 +528,11 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
         (target_table_catalog = '{catalog}' AND target_table_schema = '{schema}')
         OR
         (source_table_catalog = '{catalog}' AND source_table_schema = '{schema}')
+        OR
+        (source_path LIKE '/Volumes/{catalog}/{schema}/%')
+        OR
+        (target_path LIKE '/Volumes/{catalog}/{schema}/%')
     )
-    AND source_table_full_name IS NOT NULL
-    AND target_table_full_name IS NOT NULL
     AND event_time > current_date() - INTERVAL 90 DAYS
     """
     try:
@@ -518,53 +561,153 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
     entity_map: dict[str, dict] = {}  # entity_key → {type, id, sources, targets, last_run, owner}
     direct_pairs: set[tuple[str, str]] = set()  # (src, tgt) for rows with no entity
 
-    # Track cross-schema tables that need stub nodes
+    # Track external nodes (cross-schema tables, volumes, paths) that need stub nodes
     external_tables: set[str] = set()
+    # Track the type of each node for proper rendering (VOLUME, PATH, STREAMING_TABLE, etc.)
+    external_node_types: dict[str, str] = {}  # node_id → display type
 
     for row in lineage_rows:
-        src = row["source_table_full_name"]
-        tgt = row["target_table_full_name"]
-
-        # At least one side must be in the current schema
-        src_local = src in schema_tables
-        tgt_local = tgt in schema_tables
-        if not src_local and not tgt_local:
-            continue
-
-        # Track external (cross-schema/cross-catalog) tables for stub nodes
-        if not src_local:
-            external_tables.add(src)
-        if not tgt_local:
-            external_tables.add(tgt)
-
+        # Parse source and target using _parse_lineage_ref which handles
+        # tables, volumes (/Volumes/...), and cloud paths (s3://...)
+        src, src_type = _parse_lineage_ref(
+            row.get("source_table_full_name"),
+            row.get("source_path"),
+            row.get("source_type"),
+        )
+        tgt, tgt_type = _parse_lineage_ref(
+            row.get("target_table_full_name"),
+            row.get("target_path"),
+            row.get("target_type"),
+        )
         etype = row.get("entity_type")
         eid = row.get("entity_id")
 
-        if not etype or not eid:
-            direct_pairs.add((src, tgt))
+        # Track types for external nodes
+        if src and src not in schema_tables and src_type:
+            external_node_types[src] = src_type
+        if tgt and tgt not in schema_tables and tgt_type:
+            external_node_types[tgt] = tgt_type
+
+        # Entity-mediated rows: collect ALL without filtering — pruned below.
+        # Two-pass approach preserves upstream context for cross-schema targets.
+        if etype and eid:
+            entity_key = f"entity:{etype}:{eid}"
+            if entity_key not in entity_map:
+                entity_map[entity_key] = {
+                    "type": etype, "id": eid,
+                    "sources": set(), "targets": set(),
+                    "last_run": None, "owner": None,
+                }
+            if src:
+                entity_map[entity_key]["sources"].add(src)
+            if tgt:
+                entity_map[entity_key]["targets"].add(tgt)
+            evt = row.get("event_time")
+            if evt and (entity_map[entity_key]["last_run"] is None or evt > entity_map[entity_key]["last_run"]):
+                entity_map[entity_key]["last_run"] = evt
+            owner = row.get("created_by")
+            if owner:
+                entity_map[entity_key]["owner"] = owner
             continue
 
-        entity_key = f"entity:{etype}:{eid}"
-        if entity_key not in entity_map:
-            entity_map[entity_key] = {
-                "type": etype, "id": eid,
-                "sources": set(), "targets": set(),
-                "last_run": None, "owner": None,
-            }
-        entity_map[entity_key]["sources"].add(src)
-        entity_map[entity_key]["targets"].add(tgt)
-        # Track the latest event_time per entity
-        evt = row.get("event_time")
-        if evt and (entity_map[entity_key]["last_run"] is None or evt > entity_map[entity_key]["last_run"]):
-            entity_map[entity_key]["last_run"] = evt
-        owner = row.get("created_by")
-        if owner:
-            entity_map[entity_key]["owner"] = owner
+        # Direct pair (no entity) — filter per-row: at least one side must be local
+        src_local = src in schema_tables if src else False
+        tgt_local = tgt in schema_tables if tgt else False
+        if not src_local and not tgt_local:
+            continue
 
-    # Create stub nodes for cross-schema/cross-catalog tables with real column metadata
-    # Group external tables by catalog.schema for batch column fetching
+        if src and not src_local:
+            external_tables.add(src)
+        if tgt and not tgt_local:
+            external_tables.add(tgt)
+
+        if src and tgt:
+            direct_pairs.add((src, tgt))
+
+    # Prune entities that don't touch any local table
+    pruned_entity_map: dict[str, dict] = {}
+    for entity_key, info in entity_map.items():
+        touches_local = (
+            any(s in schema_tables for s in info["sources"])
+            or any(t in schema_tables for t in info["targets"])
+        )
+        if not touches_local:
+            continue
+        pruned_entity_map[entity_key] = info
+    entity_map = pruned_entity_map
+
+    # Follow-up query: fetch COMPLETE lineage for discovered entities.
+    # The initial query only returns rows where source OR target is in our schema,
+    # but an entity may write to tables in OTHER schemas (cross-schema targets).
+    # Without this, pipelines that read from our schema but write elsewhere show
+    # no outward edges.
+    if entity_map:
+        entity_ids = [info["id"] for info in entity_map.values()]
+        eid_list = ",".join(f"'{eid}'" for eid in entity_ids)
+        followup_sql = f"""
+        SELECT
+            source_table_full_name, target_table_full_name,
+            source_type, target_type, source_path, target_path,
+            entity_type, entity_id, event_time, created_by
+        FROM system.access.table_lineage
+        WHERE entity_id IN ({eid_list})
+        AND event_time > current_date() - INTERVAL 90 DAYS
+        """
+        try:
+            followup_rows = _execute_sql(client, followup_sql)
+            for row in followup_rows:
+                src, src_type = _parse_lineage_ref(
+                    row.get("source_table_full_name"),
+                    row.get("source_path"),
+                    row.get("source_type"),
+                )
+                tgt, tgt_type = _parse_lineage_ref(
+                    row.get("target_table_full_name"),
+                    row.get("target_path"),
+                    row.get("target_type"),
+                )
+                etype = row.get("entity_type")
+                eid = row.get("entity_id")
+                if not etype or not eid:
+                    continue
+                entity_key = f"entity:{etype}:{eid}"
+                if entity_key not in entity_map:
+                    continue  # skip entities that were pruned
+                if src:
+                    entity_map[entity_key]["sources"].add(src)
+                    if src not in schema_tables and src_type:
+                        external_node_types[src] = src_type
+                if tgt:
+                    entity_map[entity_key]["targets"].add(tgt)
+                    if tgt not in schema_tables and tgt_type:
+                        external_node_types[tgt] = tgt_type
+                evt = row.get("event_time")
+                if evt and (entity_map[entity_key]["last_run"] is None or evt > entity_map[entity_key]["last_run"]):
+                    entity_map[entity_key]["last_run"] = evt
+                owner = row.get("created_by")
+                if owner:
+                    entity_map[entity_key]["owner"] = owner
+        except Exception as e:
+            logger.warning(f"Entity follow-up lineage query failed: {e}")
+
+    # Track external tables from all entity sources/targets
+    for info in entity_map.values():
+        for s in info["sources"]:
+            if s not in schema_tables:
+                external_tables.add(s)
+        for t in info["targets"]:
+            if t not in schema_tables:
+                external_tables.add(t)
+
+    # Create stub nodes for cross-schema/cross-catalog tables, volumes, and paths.
+    # Group 3-part-name tables by catalog.schema for batch column fetching.
+    # Skip column fetch for VOLUME and PATH types (they don't have information_schema).
+    non_table_types = {"VOLUME", "PATH"}
     ext_schema_groups: dict[tuple[str, str], list[str]] = {}
     for ext_table in external_tables:
+        node_type = external_node_types.get(ext_table, "TABLE")
+        if node_type in non_table_types:
+            continue  # no columns to fetch for volumes/paths
         parts = ext_table.split(".")
         if len(parts) == 3:
             key = (parts[0], parts[1])
@@ -599,13 +742,27 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
     for ext_table in external_tables:
         if ext_table not in nodes_map:
             parts = ext_table.split(".")
+            node_type = external_node_types.get(ext_table, "EXTERNAL_LINEAGE")
+
+            # Determine display name and comment based on node type
+            if node_type == "VOLUME":
+                display_name = parts[-1] if parts else ext_table
+                comment = f"Volume in {'.'.join(parts[:2]) if len(parts) >= 2 else 'external'}"
+            elif node_type == "PATH":
+                raw = ext_table.removeprefix("path:")
+                display_name = raw.split("://", 1)[-1].split("/")[0] if "://" in raw else raw
+                comment = f"External storage: {raw}"
+            else:
+                display_name = parts[-1] if parts else ext_table
+                comment = f"Cross-schema reference from {'.'.join(parts[:2]) if len(parts) >= 2 else 'external'}"
+
             nodes_map[ext_table] = TableNode(
                 id=ext_table,
-                name=parts[-1] if parts else ext_table,
+                name=display_name,
                 full_name=ext_table,
-                table_type="EXTERNAL_LINEAGE",
+                table_type=node_type,
                 owner=None,
-                comment=f"Cross-schema reference from {'.'.join(parts[:2]) if len(parts) >= 2 else 'external'}",
+                comment=comment,
                 columns=ext_columns.get(ext_table, []),
                 created_at=None,
                 updated_at=None,
@@ -657,6 +814,32 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
                         nodes_map[entity_key].cost_usd = cost_by_job[info["id"]]
             except Exception as e:
                 logger.warning(f"Serverless job cost query failed (ensure SELECT on system.billing is granted): {e}")
+
+    # Pipeline (DLT) costs — uses usage_metadata.dlt_pipeline_id
+    pipeline_ids = [info["id"] for info in entity_map.values() if info["type"] == "PIPELINE"]
+    if pipeline_ids and price_per_dbu > 0:
+        pipeline_id_list = ",".join(f"'{pid}'" for pid in pipeline_ids)
+        dlt_dbu_sql = f"""
+        SELECT
+            usage_metadata.dlt_pipeline_id AS pipeline_id,
+            SUM(usage_quantity) AS total_dbu
+        FROM system.billing.usage
+        WHERE usage_metadata.dlt_pipeline_id IN ({pipeline_id_list})
+            AND usage_date > current_date() - INTERVAL 30 DAYS
+        GROUP BY usage_metadata.dlt_pipeline_id
+        """
+        try:
+            dlt_rows = _execute_sql(client, dlt_dbu_sql)
+            cost_by_pipeline: dict[str, float] = {}
+            for cr in dlt_rows:
+                dbu = float(cr["total_dbu"])
+                cost_by_pipeline[str(cr["pipeline_id"])] = round(dbu * price_per_dbu, 2)
+
+            for entity_key, info in entity_map.items():
+                if info["type"] == "PIPELINE" and info["id"] in cost_by_pipeline:
+                    nodes_map[entity_key].cost_usd = cost_by_pipeline[info["id"]]
+        except Exception as e:
+            logger.warning(f"DLT pipeline cost query failed (ensure SELECT on system.billing is granted): {e}")
 
     # Build edges: routed through entity nodes + direct edges
     edge_set: set[tuple[str, str]] = set()
@@ -749,8 +932,30 @@ def resolve_entity_name(entity_type: str, entity_id: str) -> dict:
             """)
             if rows and rows[0].get("name"):
                 result["name"] = rows[0]["name"]
+        elif entity_type == "PIPELINE":
+            rows = _execute_sql(client, f"""
+                SELECT name FROM system.lakeflow.pipelines
+                WHERE pipeline_id = '{entity_id}'
+                LIMIT 1
+            """)
+            if rows and rows[0].get("name"):
+                result["name"] = rows[0]["name"]
         elif entity_type == "NOTEBOOK":
-            result["name"] = entity_id.split("/")[-1] if "/" in entity_id else f"Notebook {entity_id[:12]}"
+            if "/" in entity_id:
+                result["name"] = entity_id.split("/")[-1]
+            else:
+                # Numeric workspace object ID — resolve via audit log
+                nb_rows = _execute_sql(client, f"""
+                    SELECT request_params['path'] AS path
+                    FROM system.access.audit
+                    WHERE request_params['notebookId'] = '{entity_id}'
+                      AND request_params['path'] IS NOT NULL
+                    LIMIT 1
+                """)
+                if nb_rows and nb_rows[0].get("path"):
+                    result["name"] = nb_rows[0]["path"].rsplit("/", 1)[-1]
+                else:
+                    result["name"] = f"Notebook {entity_id[:12]}"
     except Exception as e:
         logger.warning(f"Failed to resolve {entity_type} {entity_id}: {e}")
 
