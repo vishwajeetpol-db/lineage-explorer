@@ -1,7 +1,7 @@
 import { memo, useCallback, useMemo, useRef } from "react";
 import { Handle, Position, type NodeProps } from "reactflow";
 import { motion, AnimatePresence } from "framer-motion";
-import { Database, Eye, Layers, ChevronDown, Key, ExternalLink } from "lucide-react";
+import { Database, Eye, Layers, ChevronDown, Key, ExternalLink, HardDrive, FolderOpen, Zap } from "lucide-react";
 import { useLineageStore } from "../../store/lineageStore";
 import type { TableNode as TableNodeType } from "../../api/client";
 
@@ -12,6 +12,9 @@ const typeConfig: Record<string, { color: string; bg: string; border: string; ic
   VIEW: { color: "text-emerald-400", bg: "bg-emerald-500/10", border: "border-emerald-500/25", icon: Eye, label: "VIEW", dot: "bg-emerald-400" },
   MATERIALIZED_VIEW: { color: "text-amber-400", bg: "bg-amber-500/10", border: "border-amber-500/25", icon: Layers, label: "MAT VIEW", dot: "bg-amber-400" },
   EXTERNAL_LINEAGE: { color: "text-cyan-400", bg: "bg-cyan-500/10", border: "border-cyan-500/25", icon: ExternalLink, label: "CROSS-SCHEMA", dot: "bg-cyan-400" },
+  STREAMING_TABLE: { color: "text-rose-400", bg: "bg-rose-500/10", border: "border-rose-500/25", icon: Zap, label: "STREAMING", dot: "bg-rose-400" },
+  VOLUME: { color: "text-violet-400", bg: "bg-violet-500/10", border: "border-violet-500/25", icon: FolderOpen, label: "VOLUME", dot: "bg-violet-400" },
+  PATH: { color: "text-orange-400", bg: "bg-orange-500/10", border: "border-orange-500/25", icon: HardDrive, label: "STORAGE", dot: "bg-orange-400" },
 };
 
 function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded: boolean; isSelected: boolean; isHighlighted: boolean; isDimmed: boolean; isRevealed?: boolean }>) {
@@ -23,7 +26,7 @@ function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded
   const isDimmed = data.isDimmed;
   const isRevealed = data.isRevealed ?? true;
   const isOrphan = data.lineage_status === "orphan";
-  const isCrossSchema = data.table_type === "EXTERNAL_LINEAGE";
+  const isCrossSchema = ["EXTERNAL_LINEAGE", "VOLUME", "PATH"].includes(data.table_type);
 
   const handleNodeClick = useCallback(() => {
     if (columnLineageEnabled) {

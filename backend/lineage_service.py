@@ -20,9 +20,10 @@ import os
 import sys
 import time
 import logging
-import random
 import threading
-from collections import OrderedDict
+from datetime import datetime, timezone
+from typing import Callable, TypeVar
+from cachetools import TTLCache
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementState
 from backend.models import (
@@ -33,6 +34,8 @@ from backend.models import (
     LineageResponse,
     ColumnLineageResponse,
 )
+
+T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
@@ -50,21 +53,163 @@ def _get_client() -> WorkspaceClient:
 
 
 # ---------------------------------------------------------------------------
-# TTL cache with request coalescing (single-flight pattern)
+# TTL cache with request coalescing (single-flight pattern).
 #
-# Solves the thundering herd problem: if 4,000 users hit "Generate Lineage"
-# simultaneously on an empty cache, only ONE DBSQL query fires. The other
-# 3,999 requests wait on a threading.Event and receive the same result.
+# Backed by cachetools.TTLCache (LRU + TTL, memory-sized via getsizeof).
+# Single-flight uses a per-key threading.Lock with double-checked reads:
+# when N threads race on an empty key, N-1 block on the lock, and after
+# the leader populates the cache they each find the value on re-check.
 # ---------------------------------------------------------------------------
-# Cache entries: key → (created_at, last_accessed, size_bytes, value)
-_cache: OrderedDict[str, tuple[float, float, int, object]] = OrderedDict()
-_cache_lock = threading.Lock()
-_cache_total_bytes: int = 0  # running total — O(1) memory checks, no re-serialization
-_inflight: dict[str, threading.Event] = {}  # keys currently being fetched
+
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "28800"))  # default 8 hours
 CACHE_MAX_ENTRIES = int(os.environ.get("CACHE_MAX_ENTRIES", "20000"))  # secondary safety valve
 CACHE_MAX_MEMORY_MB = int(os.environ.get("CACHE_MAX_MEMORY_MB", "250"))  # primary limit
 SQL_WAIT_TIMEOUT = os.environ.get("SQL_WAIT_TIMEOUT", "50s")  # max 50s per Databricks API limit (0s or 5-50s)
+
+_CACHE_MAX_BYTES = CACHE_MAX_MEMORY_MB * 1024 * 1024
+
+
+class _CacheEntry:
+    __slots__ = ("value", "size_bytes", "created_at", "last_accessed")
+
+    def __init__(self, value: object, size_bytes: int):
+        self.value = value
+        self.size_bytes = size_bytes
+        now = time.time()
+        self.created_at = now
+        self.last_accessed = now
+
+
+def _estimate_value_size(val: object) -> int:
+    """Estimate memory footprint of a cache value. Computed once at insert time.
+    Uses JSON byte length * 2.5 to approximate Python object overhead."""
+    try:
+        if hasattr(val, 'model_dump'):
+            raw = json.dumps(val.model_dump(), default=str)
+        elif isinstance(val, (dict, list)):
+            raw = json.dumps(val, default=str)
+        else:
+            return sys.getsizeof(val)
+        return int(len(raw.encode('utf-8')) * 2.5)
+    except Exception:
+        return 1024  # conservative 1KB fallback
+
+
+def _entry_size(entry: _CacheEntry) -> int:
+    return max(1, entry.size_bytes)
+
+
+# Memory-bounded TTL+LRU cache. cachetools auto-evicts LRU when currsize > maxsize.
+_cache: TTLCache[str, _CacheEntry] = TTLCache(
+    maxsize=_CACHE_MAX_BYTES,
+    ttl=CACHE_TTL_SECONDS,
+    getsizeof=_entry_size,
+)
+_cache_lock = threading.RLock()
+
+# Per-key locks for single-flight. Reused across calls, created lazily.
+_keyed_locks: dict[str, threading.Lock] = {}
+_keyed_locks_guard = threading.Lock()
+
+
+def _get_keyed_lock(key: str) -> threading.Lock:
+    with _keyed_locks_guard:
+        lock = _keyed_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _keyed_locks[key] = lock
+        return lock
+
+
+def _cache_get(key: str):
+    """Return cached value if present and fresh; None otherwise. Promotes LRU + updates last_accessed."""
+    with _cache_lock:
+        try:
+            entry = _cache[key]  # __getitem__ bumps LRU + checks TTL expiry
+        except KeyError:
+            return None
+        entry.last_accessed = time.time()
+        return entry.value
+
+
+def _cache_get_ts(key: str) -> float | None:
+    """Return created_at timestamp of a cache entry, or None."""
+    with _cache_lock:
+        try:
+            return _cache[key].created_at
+        except KeyError:
+            return None
+
+
+def _cache_set(key: str, val: object) -> None:
+    """Store a value. TTLCache handles memory-based LRU eviction; we additionally
+    enforce the entry-count cap as a safety valve."""
+    entry = _CacheEntry(val, _estimate_value_size(val))
+    with _cache_lock:
+        _cache[key] = entry
+        while len(_cache) > CACHE_MAX_ENTRIES:
+            try:
+                evicted_key, evicted = _cache.popitem()
+                logger.info(
+                    f"Cache count-cap eviction: {evicted_key} "
+                    f"({evicted.size_bytes / 1024:.1f}KB freed)"
+                )
+            except KeyError:
+                break
+
+
+def _cached_fetch(key: str, fetcher: Callable[[], T], skip_cache: bool = False) -> T:
+    """Single-flight TTL cache helper. Double-checked locking: concurrent callers
+    on the same key serialize on a per-key lock, and all but the leader find the
+    value already cached on re-check."""
+    if not skip_cache:
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+    lock = _get_keyed_lock(key)
+    with lock:
+        if not skip_cache:
+            cached = _cache_get(key)
+            if cached is not None:
+                return cached  # type: ignore[return-value]
+        result = fetcher()
+        _cache_set(key, result)
+        return result
+
+
+def invalidate_cache(prefix: str = "") -> None:
+    """Clear all cache entries, or only those matching a prefix."""
+    with _cache_lock:
+        if not prefix:
+            _cache.clear()
+        else:
+            for k in list(_cache.keys()):
+                if k.startswith(prefix):
+                    del _cache[k]
+
+
+def evict_cache_entry(key: str) -> bool:
+    """Evict a specific cache entry by key. Returns True if found and evicted."""
+    with _cache_lock:
+        if key in _cache:
+            del _cache[key]
+            return True
+        return False
+
+
+def get_cache_snapshot() -> tuple[list[tuple[str, float, float, int]], int, list[str]]:
+    """Return cache metadata snapshot for admin dashboard.
+    Returns: [(key, created, last_accessed, size_bytes), ...], total_bytes, inflight_keys"""
+    with _cache_lock:
+        entries = [
+            (k, e.created_at, e.last_accessed, e.size_bytes)
+            for k, e in _cache.items()
+        ]
+        total_bytes = _cache.currsize
+    with _keyed_locks_guard:
+        inflight_keys = [k for k, lock in _keyed_locks.items() if lock.locked()]
+    return entries, total_bytes, inflight_keys
 
 # Serverless list price per DBU — cached globally (24h TTL, rarely changes)
 _serverless_price_per_dbu: float = 0.0
@@ -105,134 +250,6 @@ def _get_serverless_price_cached() -> float:
     return 0.0
 
 
-def _estimate_entry_size(val: object) -> int:
-    """Estimate memory footprint of a cache value. Computed once at insert time.
-    Uses JSON byte length * 2.5 to approximate Python object overhead."""
-    try:
-        if hasattr(val, 'model_dump'):
-            raw = json.dumps(val.model_dump(), default=str)
-        elif isinstance(val, (dict, list)):
-            raw = json.dumps(val, default=str)
-        else:
-            return sys.getsizeof(val)
-        return int(len(raw.encode('utf-8')) * 2.5)
-    except Exception:
-        return 1024  # conservative 1KB fallback
-
-
-def _cache_get(key: str):
-    """Return cached value if present and not expired, else None. Promotes key for LRU."""
-    global _cache_total_bytes
-    with _cache_lock:
-        entry = _cache.get(key)
-        if entry is None:
-            return None
-        created, _last, size_bytes, val = entry
-        if time.time() - created > CACHE_TTL_SECONDS:
-            _cache_total_bytes -= size_bytes
-            del _cache[key]
-            return None
-        # LRU: move to end + update last_accessed
-        _cache[key] = (created, time.time(), size_bytes, val)
-        _cache.move_to_end(key)
-        return val
-
-
-def _cache_get_ts(key: str) -> float | None:
-    """Return the created_at timestamp of a cache entry, or None."""
-    with _cache_lock:
-        entry = _cache.get(key)
-        if entry is None:
-            return None
-        return entry[0]
-
-
-def _cache_set(key: str, val: object):
-    """Set a cache entry. Evicts LRU entries when memory exceeds CACHE_MAX_MEMORY_MB."""
-    global _cache_total_bytes
-    now = time.time()
-    size_bytes = _estimate_entry_size(val)
-    max_bytes = CACHE_MAX_MEMORY_MB * 1024 * 1024
-    with _cache_lock:
-        # If replacing existing entry, subtract old size
-        if key in _cache:
-            _cache_total_bytes -= _cache[key][2]
-            _cache.move_to_end(key)
-        _cache[key] = (now, now, size_bytes, val)
-        _cache_total_bytes += size_bytes
-        # Evict LRU entries if over memory limit or entry count limit
-        while len(_cache) > 1 and (_cache_total_bytes > max_bytes or len(_cache) > CACHE_MAX_ENTRIES):
-            evicted_key, evicted = _cache.popitem(last=False)
-            _cache_total_bytes -= evicted[2]
-            logger.info(f"Cache LRU eviction: {evicted_key} ({evicted[2]/1024:.1f}KB freed, total: {_cache_total_bytes/1024/1024:.1f}MB)")
-
-
-def _cache_acquire(key: str) -> bool:
-    """Try to become the fetcher for this key. Returns True if we are the leader.
-    If False, another thread is already fetching — caller should wait then read cache."""
-    with _cache_lock:
-        if key in _inflight:
-            return False
-        _inflight[key] = threading.Event()
-        return True
-
-
-def _cache_wait(key: str, timeout: float = 120) -> object | None:
-    """Wait for the leader thread to finish fetching, then return the cached value."""
-    jitter = random.uniform(0, 10)  # spread wakeups over 10s window
-    with _cache_lock:
-        event = _inflight.get(key)
-    if event is None:
-        return _cache_get(key)
-    event.wait(timeout=timeout + jitter)
-    return _cache_get(key)
-
-
-def _cache_release(key: str):
-    """Signal all waiting threads that the fetch is done."""
-    with _cache_lock:
-        event = _inflight.pop(key, None)
-    if event:
-        event.set()
-
-
-def invalidate_cache(prefix: str = ""):
-    """Clear all cache entries, or only those matching a prefix."""
-    global _cache_total_bytes
-    with _cache_lock:
-        if not prefix:
-            _cache.clear()
-            _cache_total_bytes = 0
-        else:
-            for k in list(_cache):
-                if k.startswith(prefix):
-                    _cache_total_bytes -= _cache[k][2]
-                    del _cache[k]
-
-
-def evict_cache_entry(key: str) -> bool:
-    """Evict a specific cache entry by key. Returns True if found and evicted."""
-    global _cache_total_bytes
-    with _cache_lock:
-        if key in _cache:
-            _cache_total_bytes -= _cache[key][2]
-            del _cache[key]
-            return True
-        return False
-
-
-def get_cache_snapshot() -> tuple[list[tuple[str, float, float, int]], int, list[str]]:
-    """Return cache metadata snapshot for admin dashboard.
-    Lock held only to copy lightweight metadata — no serialization, no value access.
-    Returns: [(key, created, last_accessed, size_bytes), ...], total_bytes, inflight_keys"""
-    with _cache_lock:
-        entries = [(k, created, last_accessed, size_bytes)
-                   for k, (created, last_accessed, size_bytes, _val) in _cache.items()]
-        total_bytes = _cache_total_bytes
-        inflight_keys = list(_inflight.keys())
-    return entries, total_bytes, inflight_keys
-
-
 def _execute_sql(client: WorkspaceClient, sql: str, catalog: str = None) -> list[dict]:
     warehouse_id = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
     if not warehouse_id:
@@ -265,25 +282,26 @@ def list_catalogs() -> list[str]:
     if cached is not None:
         return cached
 
-    if not _cache_acquire(cache_key):
-        result = _cache_wait(cache_key)
-        if result is not None:
-            return result
-
-    try:
+    def _fetch() -> list[str]:
         client = _get_client()
         skip = {"system", "__databricks_internal"}
         try:
             rows = _execute_sql(client, "SHOW CATALOGS")
-            result = sorted([r["catalog"] for r in rows if r["catalog"] not in skip])
+            return sorted([r["catalog"] for r in rows if r["catalog"] not in skip])
         except Exception as e:
             logger.error(f"SHOW CATALOGS failed: {e}")
-            result = []
+            return []
+
+    # Empty results bypass caching (same as before): retry on next call.
+    lock = _get_keyed_lock(cache_key)
+    with lock:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+        result = _fetch()
         if result:
             _cache_set(cache_key, result)
         return result
-    finally:
-        _cache_release(cache_key)
 
 
 def list_all_tables() -> list[dict]:
@@ -299,22 +317,10 @@ def list_all_tables() -> list[dict]:
     if cached is not None:
         return cached
 
-    if not _cache_acquire(cache_key):
-        logger.info("Request coalescing: waiting for in-flight fetch of all_tables")
-        result = _cache_wait(cache_key)
-        if result is not None:
-            return result
-        time.sleep(random.uniform(0.05, 0.5))
-        if not _cache_acquire(cache_key):
-            result = _cache_wait(cache_key)
-            if result is not None:
-                return result
-
-    try:
+    def _fetch() -> list[dict]:
         client = _get_client()
         catalogs = list_catalogs()
-        tables = []
-
+        tables: list[dict] = []
         for cat in catalogs:
             try:
                 sql = f"""
@@ -337,12 +343,18 @@ def list_all_tables() -> list[dict]:
             except Exception as e:
                 logger.warning(f"Failed to list tables in catalog {cat}: {e}")
                 continue
+        return tables
 
+    # Never cache empty results (retry on next call).
+    lock = _get_keyed_lock(cache_key)
+    with lock:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+        tables = _fetch()
         if tables:
             _cache_set(cache_key, tables)
         return tables
-    finally:
-        _cache_release(cache_key)
 
 
 def list_schemas(catalog: str) -> list[str]:
@@ -352,39 +364,50 @@ def list_schemas(catalog: str) -> list[str]:
     if cached is not None:
         return cached
 
-    if not _cache_acquire(cache_key):
-        result = _cache_wait(cache_key)
-        if result is not None:
-            return result
-
-    try:
+    def _fetch() -> list[str]:
         client = _get_client()
         skip = {"information_schema", "default"}
         try:
             rows = _execute_sql(client, f"SHOW SCHEMAS IN `{catalog}`", catalog=catalog)
-            result = sorted([r["databaseName"] for r in rows if r["databaseName"] not in skip])
+            return sorted([r["databaseName"] for r in rows if r["databaseName"] not in skip])
         except Exception as e:
             logger.error(f"SHOW SCHEMAS failed for {catalog}: {e}")
-            result = []
+            return []
+
+    lock = _get_keyed_lock(cache_key)
+    with lock:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+        result = _fetch()
         if result:
             _cache_set(cache_key, result)
         return result
-    finally:
-        _cache_release(cache_key)
 
 
-def _add_cache_metadata(result: LineageResponse, cache_key: str, fetch_ms: int | None = None, from_cache: bool = False) -> LineageResponse:
-    """Attach cache metadata to the response."""
-    from datetime import datetime, timezone
+def _wrap_with_cache_metadata(
+    result: LineageResponse,
+    cache_key: str,
+    from_cache: bool,
+    fetch_ms: int | None = None,
+) -> LineageResponse:
+    """Return a copy of the response with cache metadata attached.
+
+    Uses model_copy so the cached object stays immutable — concurrent requests
+    can't observe a half-updated response, and there's no shared-reference drift
+    between what's in the cache and what goes out on the wire.
+    """
+    updates: dict = {}
     cache_ts = _cache_get_ts(cache_key)
     if cache_ts is not None:
-        result.cached = from_cache
-        result.cached_at = datetime.fromtimestamp(cache_ts, tz=timezone.utc).isoformat()
-        expires = cache_ts + CACHE_TTL_SECONDS
-        result.cache_expires_at = datetime.fromtimestamp(expires, tz=timezone.utc).isoformat()
+        updates["cached"] = from_cache
+        updates["cached_at"] = datetime.fromtimestamp(cache_ts, tz=timezone.utc).isoformat()
+        updates["cache_expires_at"] = datetime.fromtimestamp(
+            cache_ts + CACHE_TTL_SECONDS, tz=timezone.utc
+        ).isoformat()
     if fetch_ms is not None:
-        result.fetch_duration_ms = fetch_ms
-    return result
+        updates["fetch_duration_ms"] = fetch_ms
+    return result.model_copy(update=updates) if updates else result
 
 
 def get_table_lineage(catalog: str, schema: str, skip_cache: bool = False) -> LineageResponse:
@@ -393,29 +416,57 @@ def get_table_lineage(catalog: str, schema: str, skip_cache: bool = False) -> Li
     if not skip_cache:
         cached = _cache_get(cache_key)
         if cached is not None:
-            return _add_cache_metadata(cached, cache_key, fetch_ms=0, from_cache=True)
+            return _wrap_with_cache_metadata(cached, cache_key, from_cache=True, fetch_ms=0)
 
-        # Single-flight: if another thread is already fetching this key, wait for it
-        if not _cache_acquire(cache_key):
-            logger.info(f"Request coalescing: waiting for in-flight fetch of {cache_key}")
-            result = _cache_wait(cache_key)
-            if result is not None:
-                return _add_cache_metadata(result, cache_key, fetch_ms=0, from_cache=True)
-            # Leader failed — backoff before retrying to avoid stampede
-            time.sleep(random.uniform(0.05, 0.5))
-            if not _cache_acquire(cache_key):
-                result = _cache_wait(cache_key)
-                if result is not None:
-                    return _add_cache_metadata(result, cache_key, fetch_ms=0, from_cache=True)
-                # Still no luck — proceed solo (safe: just a redundant query)
+    lock = _get_keyed_lock(cache_key)
+    with lock:
+        if not skip_cache:
+            cached = _cache_get(cache_key)
+            if cached is not None:
+                return _wrap_with_cache_metadata(cached, cache_key, from_cache=True, fetch_ms=0)
 
-    try:
         fetch_start = time.time()
         result = _fetch_table_lineage(catalog, schema, cache_key)
         fetch_ms = int((time.time() - fetch_start) * 1000)
-        return _add_cache_metadata(result, cache_key, fetch_ms=fetch_ms, from_cache=False)
-    finally:
-        _cache_release(cache_key)
+        _cache_set(cache_key, result)
+        return _wrap_with_cache_metadata(result, cache_key, from_cache=False, fetch_ms=fetch_ms)
+
+
+def _parse_lineage_ref(table_full_name: str | None, path: str | None, ref_type: str | None) -> tuple[str | None, str | None]:
+    """Parse a lineage source/target into (node_id, node_type).
+
+    Returns a stable node ID and a type string suitable for TableNode.table_type.
+    Handles tables, views, streaming tables, volumes (/Volumes/...), and cloud paths (s3://).
+    """
+    if table_full_name:
+        # Map system lineage types to display types
+        type_map = {
+            "TABLE": "TABLE",
+            "VIEW": "VIEW",
+            "MATERIALIZED_VIEW": "MATERIALIZED_VIEW",
+            "STREAMING_TABLE": "STREAMING_TABLE",
+        }
+        return table_full_name, type_map.get(ref_type, ref_type or "TABLE")
+
+    if path:
+        # Volume path: /Volumes/catalog/schema/volume_name/...
+        if path.startswith("/Volumes/"):
+            parts = path.split("/")
+            if len(parts) >= 5:
+                vol_id = f"{parts[2]}.{parts[3]}.{parts[4]}"
+                return vol_id, "VOLUME"
+            return f"volume:{path}", "VOLUME"
+
+        # Cloud storage path: s3://bucket/..., abfss://container@account/...
+        if "://" in path:
+            proto, rest = path.split("://", 1)
+            bucket = rest.split("/")[0]
+            return f"path:{proto}://{bucket}", "PATH"
+
+        # Other path
+        return f"path:{path[:80]}", "PATH"
+
+    return None, None
 
 
 def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageResponse:
@@ -473,11 +524,16 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
     for t in table_rows:
         schema_tables.add(f"{catalog}.{schema}.{t['table_name']}")
 
-    # Get lineage edges from system tables (with entity info for pipeline nodes)
+    # Get lineage edges from system tables (with entity info for pipeline nodes).
+    # Includes PATH entries (volumes, cloud storage) alongside table references.
     lineage_sql = f"""
     SELECT
         source_table_full_name,
         target_table_full_name,
+        source_type,
+        target_type,
+        source_path,
+        target_path,
         entity_type,
         entity_id,
         event_time,
@@ -487,9 +543,11 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
         (target_table_catalog = '{catalog}' AND target_table_schema = '{schema}')
         OR
         (source_table_catalog = '{catalog}' AND source_table_schema = '{schema}')
+        OR
+        (source_path LIKE '/Volumes/{catalog}/{schema}/%')
+        OR
+        (target_path LIKE '/Volumes/{catalog}/{schema}/%')
     )
-    AND source_table_full_name IS NOT NULL
-    AND target_table_full_name IS NOT NULL
     AND event_time > current_date() - INTERVAL 90 DAYS
     """
     try:
@@ -514,57 +572,167 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
             updated_at=t.get("last_altered"),
         )
 
-    # Group lineage rows by entity and build entity nodes + routed edges
+    # Group lineage rows by entity and build entity nodes + routed edges.
+    # Two-pass approach: collect ALL entity rows first (without per-row local
+    # filtering), then prune entities that don't touch any local table. This
+    # ensures upstream (left-side) tables from other schemas are included when
+    # the entity also writes to a local table.
     entity_map: dict[str, dict] = {}  # entity_key → {type, id, sources, targets, last_run, owner}
     direct_pairs: set[tuple[str, str]] = set()  # (src, tgt) for rows with no entity
 
-    # Track cross-schema tables that need stub nodes
+    # Track external nodes (cross-schema tables, volumes, paths) that need stub nodes
     external_tables: set[str] = set()
+    # Track the type of each node for proper rendering (VOLUME, PATH, STREAMING_TABLE, etc.)
+    external_node_types: dict[str, str] = {}  # node_id → display type
 
     for row in lineage_rows:
-        src = row["source_table_full_name"]
-        tgt = row["target_table_full_name"]
-
-        # At least one side must be in the current schema
-        src_local = src in schema_tables
-        tgt_local = tgt in schema_tables
-        if not src_local and not tgt_local:
-            continue
-
-        # Track external (cross-schema/cross-catalog) tables for stub nodes
-        if not src_local:
-            external_tables.add(src)
-        if not tgt_local:
-            external_tables.add(tgt)
-
+        # Parse source and target using _parse_lineage_ref which handles
+        # tables, volumes (/Volumes/...), and cloud paths (s3://...)
+        src, src_type = _parse_lineage_ref(
+            row.get("source_table_full_name"),
+            row.get("source_path"),
+            row.get("source_type"),
+        )
+        tgt, tgt_type = _parse_lineage_ref(
+            row.get("target_table_full_name"),
+            row.get("target_path"),
+            row.get("target_type"),
+        )
         etype = row.get("entity_type")
         eid = row.get("entity_id")
 
-        if not etype or not eid:
-            direct_pairs.add((src, tgt))
+        # Track types for external nodes
+        if src and src not in schema_tables and src_type:
+            external_node_types[src] = src_type
+        if tgt and tgt not in schema_tables and tgt_type:
+            external_node_types[tgt] = tgt_type
+
+        # Entity-mediated rows: collect ALL without filtering — pruned below
+        if etype and eid:
+            entity_key = f"entity:{etype}:{eid}"
+            if entity_key not in entity_map:
+                entity_map[entity_key] = {
+                    "type": etype, "id": eid,
+                    "sources": set(), "targets": set(),
+                    "last_run": None, "owner": None,
+                }
+            if src:
+                entity_map[entity_key]["sources"].add(src)
+            if tgt:
+                entity_map[entity_key]["targets"].add(tgt)
+            evt = row.get("event_time")
+            if evt and (entity_map[entity_key]["last_run"] is None or evt > entity_map[entity_key]["last_run"]):
+                entity_map[entity_key]["last_run"] = evt
+            owner = row.get("created_by")
+            if owner:
+                entity_map[entity_key]["owner"] = owner
             continue
 
-        entity_key = f"entity:{etype}:{eid}"
-        if entity_key not in entity_map:
-            entity_map[entity_key] = {
-                "type": etype, "id": eid,
-                "sources": set(), "targets": set(),
-                "last_run": None, "owner": None,
-            }
-        entity_map[entity_key]["sources"].add(src)
-        entity_map[entity_key]["targets"].add(tgt)
-        # Track the latest event_time per entity
-        evt = row.get("event_time")
-        if evt and (entity_map[entity_key]["last_run"] is None or evt > entity_map[entity_key]["last_run"]):
-            entity_map[entity_key]["last_run"] = evt
-        owner = row.get("created_by")
-        if owner:
-            entity_map[entity_key]["owner"] = owner
+        # Direct pair (no entity) — filter per-row: at least one side must be local
+        src_local = src in schema_tables if src else False
+        tgt_local = tgt in schema_tables if tgt else False
+        if not src_local and not tgt_local:
+            continue
 
-    # Create stub nodes for cross-schema/cross-catalog tables with real column metadata
-    # Group external tables by catalog.schema for batch column fetching
+        if src and not src_local:
+            external_tables.add(src)
+        if tgt and not tgt_local:
+            external_tables.add(tgt)
+
+        if src and tgt:
+            direct_pairs.add((src, tgt))
+
+    # Prune entities that don't touch any local table
+    pruned_entity_map: dict[str, dict] = {}
+    for entity_key, info in entity_map.items():
+        touches_local = (
+            any(s in schema_tables for s in info["sources"])
+            or any(t in schema_tables for t in info["targets"])
+        )
+        if not touches_local:
+            continue
+        pruned_entity_map[entity_key] = info
+    entity_map = pruned_entity_map
+
+    # Follow-up query: fetch COMPLETE lineage for discovered entities.
+    # The initial query only returns rows where source OR target is in our schema,
+    # but an entity may write to tables in OTHER schemas (cross-schema targets).
+    # Without this, pipelines that read from our schema but write elsewhere show
+    # no outward edges.
+    if entity_map:
+        entity_ids = [info["id"] for info in entity_map.values()]
+        eid_list = ",".join(f"'{eid}'" for eid in entity_ids)
+        followup_sql = f"""
+        SELECT
+            source_table_full_name,
+            target_table_full_name,
+            source_type,
+            target_type,
+            source_path,
+            target_path,
+            entity_type,
+            entity_id,
+            event_time,
+            created_by
+        FROM system.access.table_lineage
+        WHERE entity_id IN ({eid_list})
+        AND event_time > current_date() - INTERVAL 90 DAYS
+        """
+        try:
+            followup_rows = _execute_sql(client, followup_sql)
+            for row in followup_rows:
+                src, src_type = _parse_lineage_ref(
+                    row.get("source_table_full_name"),
+                    row.get("source_path"),
+                    row.get("source_type"),
+                )
+                tgt, tgt_type = _parse_lineage_ref(
+                    row.get("target_table_full_name"),
+                    row.get("target_path"),
+                    row.get("target_type"),
+                )
+                etype = row.get("entity_type")
+                eid = row.get("entity_id")
+                if not etype or not eid:
+                    continue
+                entity_key = f"entity:{etype}:{eid}"
+                if entity_key not in entity_map:
+                    continue  # skip entities that were pruned
+                if src:
+                    entity_map[entity_key]["sources"].add(src)
+                    if src not in schema_tables and src_type:
+                        external_node_types[src] = src_type
+                if tgt:
+                    entity_map[entity_key]["targets"].add(tgt)
+                    if tgt not in schema_tables and tgt_type:
+                        external_node_types[tgt] = tgt_type
+                evt = row.get("event_time")
+                if evt and (entity_map[entity_key]["last_run"] is None or evt > entity_map[entity_key]["last_run"]):
+                    entity_map[entity_key]["last_run"] = evt
+                owner = row.get("created_by")
+                if owner:
+                    entity_map[entity_key]["owner"] = owner
+        except Exception as e:
+            logger.warning(f"Entity follow-up lineage query failed: {e}")
+
+    # Track external tables from all entity sources/targets
+    for info in entity_map.values():
+        for s in info["sources"]:
+            if s not in schema_tables:
+                external_tables.add(s)
+        for t in info["targets"]:
+            if t not in schema_tables:
+                external_tables.add(t)
+
+    # Create stub nodes for cross-schema/cross-catalog tables, volumes, and paths.
+    # Group 3-part-name tables by catalog.schema for batch column fetching.
+    # Skip column fetch for VOLUME and PATH types (they don't have information_schema).
+    non_table_types = {"VOLUME", "PATH"}
     ext_schema_groups: dict[tuple[str, str], list[str]] = {}
     for ext_table in external_tables:
+        node_type = external_node_types.get(ext_table, "TABLE")
+        if node_type in non_table_types:
+            continue  # no columns to fetch for volumes/paths
         parts = ext_table.split(".")
         if len(parts) == 3:
             key = (parts[0], parts[1])
@@ -599,13 +767,28 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
     for ext_table in external_tables:
         if ext_table not in nodes_map:
             parts = ext_table.split(".")
+            node_type = external_node_types.get(ext_table, "EXTERNAL_LINEAGE")
+
+            # Determine display name and comment based on node type
+            if node_type == "VOLUME":
+                display_name = parts[-1] if parts else ext_table
+                comment = f"Volume in {'.'.join(parts[:2]) if len(parts) >= 2 else 'external'}"
+            elif node_type == "PATH":
+                # Cloud storage: strip path: prefix for display
+                raw = ext_table.removeprefix("path:")
+                display_name = raw.split("://", 1)[-1].split("/")[0] if "://" in raw else raw
+                comment = f"External storage: {raw}"
+            else:
+                display_name = parts[-1] if parts else ext_table
+                comment = f"Cross-schema reference from {'.'.join(parts[:2]) if len(parts) >= 2 else 'external'}"
+
             nodes_map[ext_table] = TableNode(
                 id=ext_table,
-                name=parts[-1] if parts else ext_table,
+                name=display_name,
                 full_name=ext_table,
-                table_type="EXTERNAL_LINEAGE",
+                table_type=node_type,
                 owner=None,
-                comment=f"Cross-schema reference from {'.'.join(parts[:2]) if len(parts) >= 2 else 'external'}",
+                comment=comment,
                 columns=ext_columns.get(ext_table, []),
                 created_at=None,
                 updated_at=None,
@@ -621,42 +804,69 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
             owner=info["owner"],
         )
 
-    # Fetch serverless job costs from system.billing (30-day window).
-    # Only for JOB entities — classic compute is excluded by SKU filter.
+    # Fetch compute costs from system.billing (30-day window).
+    # Covers both JOB entities (usage_metadata.job_id) and PIPELINE entities
+    # (usage_metadata.dlt_pipeline_id). Classic compute is excluded by SKU filter.
     # Cost = DBUs * list price per DBU (per official Databricks docs).
     #   https://docs.databricks.com/aws/en/admin/usage/system-tables
     #
     # Performance: list price is cached globally (24h TTL) — only the fast
-    # DBU aggregation query runs per schema load. Entire result is then cached
+    # DBU aggregation queries run per schema load. Entire result is then cached
     # with the lineage response — zero extra queries on repeat visits.
-    job_ids = [info["id"] for info in entity_map.values() if info["type"] == "JOB"]
-    if job_ids:
-        # Blocking on first call (once per 24h), instant from cache after that.
-        price_per_dbu = _get_serverless_price(client)
-        if price_per_dbu > 0:
-            job_id_list = ",".join(f"'{jid}'" for jid in job_ids)
-            dbu_sql = f"""
-            SELECT
-                usage_metadata.job_id AS job_id,
-                SUM(usage_quantity) AS total_dbu
-            FROM system.billing.usage
-            WHERE sku_name LIKE '%SERVERLESS%'
-                AND usage_metadata.job_id IN ({job_id_list})
-                AND usage_date > current_date() - INTERVAL 30 DAYS
-            GROUP BY usage_metadata.job_id
-            """
-            try:
-                dbu_rows = _execute_sql(client, dbu_sql)
-                cost_by_job: dict[str, float] = {}
-                for cr in dbu_rows:
-                    dbu = float(cr["total_dbu"])
-                    cost_by_job[str(cr["job_id"])] = round(dbu * price_per_dbu, 2)
+    price_per_dbu = _get_serverless_price(client)
 
-                for entity_key, info in entity_map.items():
-                    if info["type"] == "JOB" and info["id"] in cost_by_job:
-                        nodes_map[entity_key].cost_usd = cost_by_job[info["id"]]
-            except Exception as e:
-                logger.warning(f"Serverless job cost query failed (ensure SELECT on system.billing is granted): {e}")
+    # Job costs (serverless)
+    job_ids = [info["id"] for info in entity_map.values() if info["type"] == "JOB"]
+    if job_ids and price_per_dbu > 0:
+        job_id_list = ",".join(f"'{jid}'" for jid in job_ids)
+        dbu_sql = f"""
+        SELECT
+            usage_metadata.job_id AS job_id,
+            SUM(usage_quantity) AS total_dbu
+        FROM system.billing.usage
+        WHERE sku_name LIKE '%SERVERLESS%'
+            AND usage_metadata.job_id IN ({job_id_list})
+            AND usage_date > current_date() - INTERVAL 30 DAYS
+        GROUP BY usage_metadata.job_id
+        """
+        try:
+            dbu_rows = _execute_sql(client, dbu_sql)
+            cost_by_job: dict[str, float] = {}
+            for cr in dbu_rows:
+                dbu = float(cr["total_dbu"])
+                cost_by_job[str(cr["job_id"])] = round(dbu * price_per_dbu, 2)
+
+            for entity_key, info in entity_map.items():
+                if info["type"] == "JOB" and info["id"] in cost_by_job:
+                    nodes_map[entity_key].cost_usd = cost_by_job[info["id"]]
+        except Exception as e:
+            logger.warning(f"Serverless job cost query failed (ensure SELECT on system.billing is granted): {e}")
+
+    # Pipeline (DLT) costs — uses usage_metadata.dlt_pipeline_id
+    pipeline_ids = [info["id"] for info in entity_map.values() if info["type"] == "PIPELINE"]
+    if pipeline_ids and price_per_dbu > 0:
+        pipeline_id_list = ",".join(f"'{pid}'" for pid in pipeline_ids)
+        dlt_dbu_sql = f"""
+        SELECT
+            usage_metadata.dlt_pipeline_id AS pipeline_id,
+            SUM(usage_quantity) AS total_dbu
+        FROM system.billing.usage
+        WHERE usage_metadata.dlt_pipeline_id IN ({pipeline_id_list})
+            AND usage_date > current_date() - INTERVAL 30 DAYS
+        GROUP BY usage_metadata.dlt_pipeline_id
+        """
+        try:
+            dlt_rows = _execute_sql(client, dlt_dbu_sql)
+            cost_by_pipeline: dict[str, float] = {}
+            for cr in dlt_rows:
+                dbu = float(cr["total_dbu"])
+                cost_by_pipeline[str(cr["pipeline_id"])] = round(dbu * price_per_dbu, 2)
+
+            for entity_key, info in entity_map.items():
+                if info["type"] == "PIPELINE" and info["id"] in cost_by_pipeline:
+                    nodes_map[entity_key].cost_usd = cost_by_pipeline[info["id"]]
+        except Exception as e:
+            logger.warning(f"DLT pipeline cost query failed (ensure SELECT on system.billing is granted): {e}")
 
     # Build edges: routed through entity nodes + direct edges
     edge_set: set[tuple[str, str]] = set()
@@ -709,80 +919,66 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
         nodes=list(nodes_map.values()),
         edges=edges,
     )
-    _cache_set(cache_key, result)
+    # Caching of the top-level lineage response is handled by get_table_lineage.
     return result
 
 
 def resolve_entity_name(entity_type: str, entity_id: str) -> dict:
     """Resolve an entity ID to display name + metadata via system tables. Coalesced + cached."""
     cache_key = f"entity_name:{entity_type}:{entity_id}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
 
-    if not _cache_acquire(cache_key):
-        result = _cache_wait(cache_key)
-        if result is not None:
-            return result
-
-    client = _get_client()
-    result = {"name": f"{entity_type} {entity_id[:12]}"}
-
-    try:
-        if entity_type == "JOB":
-            rows = _execute_sql(client, f"""
-                SELECT name, run_as_user_name, creator_user_name
-                FROM system.lakeflow.jobs
-                WHERE job_id = '{entity_id}'
-                LIMIT 1
-            """)
-            if rows:
-                r = rows[0]
-                if r.get("name"):
-                    result["name"] = r["name"]
-                result["owner"] = r.get("run_as_user_name") or r.get("creator_user_name")
-        elif entity_type == "PIPELINE":
-            rows = _execute_sql(client, f"""
-                SELECT name FROM system.lakeflow.pipelines
-                WHERE pipeline_id = '{entity_id}'
-                LIMIT 1
-            """)
-            if rows and rows[0].get("name"):
-                result["name"] = rows[0]["name"]
-        elif entity_type == "NOTEBOOK":
-            result["name"] = entity_id.split("/")[-1] if "/" in entity_id else f"Notebook {entity_id[:12]}"
-    except Exception as e:
-        logger.warning(f"Failed to resolve {entity_type} {entity_id}: {e}")
-
-    try:
-        _cache_set(cache_key, result)
+    def _fetch() -> dict:
+        client = _get_client()
+        result = {"name": f"{entity_type} {entity_id[:12]}"}
+        try:
+            if entity_type == "JOB":
+                rows = _execute_sql(client, f"""
+                    SELECT name, run_as_user_name, creator_user_name
+                    FROM system.lakeflow.jobs
+                    WHERE job_id = '{entity_id}'
+                    LIMIT 1
+                """)
+                if rows:
+                    r = rows[0]
+                    if r.get("name"):
+                        result["name"] = r["name"]
+                    result["owner"] = r.get("run_as_user_name") or r.get("creator_user_name")
+            elif entity_type == "PIPELINE":
+                rows = _execute_sql(client, f"""
+                    SELECT name FROM system.lakeflow.pipelines
+                    WHERE pipeline_id = '{entity_id}'
+                    LIMIT 1
+                """)
+                if rows and rows[0].get("name"):
+                    result["name"] = rows[0]["name"]
+            elif entity_type == "NOTEBOOK":
+                if "/" in entity_id:
+                    result["name"] = entity_id.split("/")[-1]
+                else:
+                    # Numeric workspace object ID — resolve via audit log
+                    nb_rows = _execute_sql(client, f"""
+                        SELECT request_params['path'] AS path
+                        FROM system.access.audit
+                        WHERE request_params['notebookId'] = '{entity_id}'
+                          AND request_params['path'] IS NOT NULL
+                        LIMIT 1
+                    """)
+                    if nb_rows and nb_rows[0].get("path"):
+                        result["name"] = nb_rows[0]["path"].rsplit("/", 1)[-1]
+                    else:
+                        result["name"] = f"Notebook {entity_id[:12]}"
+        except Exception as e:
+            logger.warning(f"Failed to resolve {entity_type} {entity_id}: {e}")
         return result
-    finally:
-        _cache_release(cache_key)
+
+    return _cached_fetch(cache_key, _fetch)
 
 
 def get_columns(catalog: str, schema: str, table: str, skip_cache: bool = False) -> list[dict]:
     """Lazy column loader — returns columns for a single table (cache-first, coalesced)."""
     cache_key = f"columns:{catalog}.{schema}.{table}"
 
-    if not skip_cache:
-        cached = _cache_get(cache_key)
-        if cached is not None:
-            return cached
-
-        if not _cache_acquire(cache_key):
-            result = _cache_wait(cache_key)
-            if result is not None:
-                return result
-            # Leader failed — backoff before retrying to avoid stampede
-            time.sleep(random.uniform(0.05, 0.5))
-            if not _cache_acquire(cache_key):
-                result = _cache_wait(cache_key)
-                if result is not None:
-                    return result
-                # Still no luck — proceed solo
-
-    try:
+    def _fetch() -> list[dict]:
         client = _get_client()
         sql = f"""
         SELECT column_name, data_type, is_nullable, ordinal_position
@@ -791,11 +987,12 @@ def get_columns(catalog: str, schema: str, table: str, skip_cache: bool = False)
         ORDER BY ordinal_position
         """
         rows = _execute_sql(client, sql, catalog=catalog)
-        cols = [{"name": r["column_name"], "type": r["data_type"], "nullable": r["is_nullable"] == "YES"} for r in rows]
-        _cache_set(cache_key, cols)
-        return cols
-    finally:
-        _cache_release(cache_key)
+        return [
+            {"name": r["column_name"], "type": r["data_type"], "nullable": r["is_nullable"] == "YES"}
+            for r in rows
+        ]
+
+    return _cached_fetch(cache_key, _fetch, skip_cache=skip_cache)
 
 
 def get_schema_column_lineage(catalog: str, schema: str, skip_cache: bool = False) -> ColumnLineageResponse:
@@ -807,24 +1004,9 @@ def get_schema_column_lineage(catalog: str, schema: str, skip_cache: bool = Fals
     """
     cache_key = f"col_lineage:{catalog}.{schema}"
 
-    if not skip_cache:
-        cached = _cache_get(cache_key)
-        if cached is not None:
-            return cached
-
-        if not _cache_acquire(cache_key):
-            result = _cache_wait(cache_key)
-            if result is not None:
-                return result
-            time.sleep(random.uniform(0.05, 0.5))
-            if not _cache_acquire(cache_key):
-                result = _cache_wait(cache_key)
-                if result is not None:
-                    return result
-
-    try:
+    def _fetch() -> ColumnLineageResponse:
         client = _get_client()
-        rows = []
+        rows: list[dict] = []
         try:
             sql = f"""
             SELECT DISTINCT
@@ -840,6 +1022,7 @@ def get_schema_column_lineage(catalog: str, schema: str, skip_cache: bool = Fals
             )
             AND source_table_full_name IS NOT NULL
             AND target_table_full_name IS NOT NULL
+            AND source_table_full_name != target_table_full_name
             AND source_column_name IS NOT NULL
             AND target_column_name IS NOT NULL
             AND event_time > current_date() - INTERVAL 90 DAYS
@@ -849,20 +1032,18 @@ def get_schema_column_lineage(catalog: str, schema: str, skip_cache: bool = Fals
         except Exception as e:
             logger.warning(f"Schema column lineage query failed: {e}")
 
-        edges = []
-        for row in rows:
-            edges.append(ColumnLineageEdge(
+        edges = [
+            ColumnLineageEdge(
                 source_table=row["source_table_full_name"],
                 source_column=row["source_column_name"],
                 target_table=row["target_table_full_name"],
                 target_column=row["target_column_name"],
-            ))
+            )
+            for row in rows
+        ]
+        return ColumnLineageResponse(edges=edges)
 
-        result = ColumnLineageResponse(edges=edges)
-        _cache_set(cache_key, result)
-        return result
-    finally:
-        _cache_release(cache_key)
+    return _cached_fetch(cache_key, _fetch, skip_cache=skip_cache)
 
 
 def get_column_lineage(catalog: str, schema: str, table: str, column: str, skip_cache: bool = False) -> ColumnLineageResponse:

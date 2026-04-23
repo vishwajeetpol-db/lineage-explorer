@@ -116,6 +116,15 @@ function LineageCanvas() {
       }
     }
 
+    // Expand entity neighborhoods: when an entity is discovered (e.g. a pipeline
+    // found via upstream BFS), include ALL its direct neighbors (sources + targets)
+    // so the entity shows full context — not just the path to the focused table.
+    for (const nodeId of [...connected]) {
+      if (!isEntity(nodeId)) continue;
+      for (const src of upstream.get(nodeId) || []) connected.add(src);
+      for (const tgt of downstream.get(nodeId) || []) connected.add(tgt);
+    }
+
     const filteredNodes = allNodes.filter((n) => connected.has(n.id));
     const filteredEdges = allEdges.filter((e) => connected.has(e.source) && connected.has(e.target));
     return { rawNodes: filteredNodes, rawEdges: filteredEdges };
@@ -367,6 +376,12 @@ function LineageCanvas() {
   // =========================================================================
   // LAYOUT EFFECT — runs ONLY when raw data changes or reset is pressed.
   // NEVER runs on expand/collapse (expandedNodes is NOT a dependency).
+  //
+  // Cancellation: AbortController aborts the previous ELK layout when the user
+  // switches schemas before it finishes. Without this, an older layout's
+  // Promise can resolve AFTER a newer one and overwrite the graph with stale
+  // data. fitView retry timers are also tracked so they don't fire on a graph
+  // that's already been replaced.
   // =========================================================================
   useEffect(() => {
     if (viewNodes.length === 0) {
@@ -374,6 +389,9 @@ function LineageCanvas() {
       setFlowEdges([]);
       return;
     }
+
+    const controller = new AbortController();
+    const fitViewTimers: ReturnType<typeof setTimeout>[] = [];
 
     const rfNodes: Node[] = viewNodes.map((n) => ({
       id: n.id,
@@ -400,56 +418,72 @@ function LineageCanvas() {
       data: { isHighlighted: false, isDimmed: false, isColumnEdge: false, isVisible: true },
     }));
 
-    // ELK layout — always uses collapsed dimensions for stable positioning
-    layoutGraph(rfNodes, rfEdges, new Set()).then(({ nodes, edges }) => {
-      const isLargeGraph = nodes.length > 50;
+    // ELK layout — always uses collapsed dimensions for stable positioning.
+    // Runs in a Web Worker so large graphs don't block the main thread.
+    layoutGraph(rfNodes, rfEdges, new Set(), controller.signal)
+      .then(({ nodes, edges }) => {
+        if (controller.signal.aborted) return;
+        const isLargeGraph = nodes.length > 50;
 
-      if (isLargeGraph) {
-        // Large graphs: reveal all at once to avoid 275+ re-render cycles
-        const readyNodes = nodes.map((n) => ({
-          ...n,
-          data: { ...n.data, revealOrder: 0, isRevealed: true },
-        }));
-        const readyEdges = edges.map((e) => ({
-          ...e,
-          data: { ...e.data, isVisible: true },
-        }));
-        setFlowNodes(readyNodes);
-        setFlowEdges(readyEdges);
-        setRevealCounter(Infinity); // skip staggered reveal
-        // React Flow needs time to measure all node dimensions before fitView works.
-        // Retry fitView at increasing intervals to handle slow renders on large graphs.
-        const fitViewRetries = [100, 500, 1000, 2000];
-        fitViewRetries.forEach((delay) => {
-          setTimeout(() => {
-            reactFlowInstance.fitView({ padding: 0.15, duration: 300 });
-          }, delay);
-        });
-      } else {
-        // Small graphs: staggered reveal left-to-right
-        const sorted = [...nodes].sort((a, b) => a.position.x - b.position.x);
-        const orderMap = new Map<string, number>();
-        sorted.forEach((n, i) => orderMap.set(n.id, i));
+        if (isLargeGraph) {
+          // Large graphs: reveal all at once to avoid 275+ re-render cycles
+          const readyNodes = nodes.map((n) => ({
+            ...n,
+            data: { ...n.data, revealOrder: 0, isRevealed: true },
+          }));
+          const readyEdges = edges.map((e) => ({
+            ...e,
+            data: { ...e.data, isVisible: true },
+          }));
+          setFlowNodes(readyNodes);
+          setFlowEdges(readyEdges);
+          setRevealCounter(Infinity); // skip staggered reveal
+          // React Flow needs time to measure all node dimensions before fitView works.
+          // Retry fitView at increasing intervals to handle slow renders on large graphs.
+          const fitViewRetries = [100, 500, 1000, 2000];
+          fitViewRetries.forEach((delay) => {
+            const t = setTimeout(() => {
+              if (!controller.signal.aborted) {
+                reactFlowInstance.fitView({ padding: 0.15, duration: 300 });
+              }
+            }, delay);
+            fitViewTimers.push(t);
+          });
+        } else {
+          // Small graphs: staggered reveal left-to-right
+          const sorted = [...nodes].sort((a, b) => a.position.x - b.position.x);
+          const orderMap = new Map<string, number>();
+          sorted.forEach((n, i) => orderMap.set(n.id, i));
 
-        const revealNodes = nodes.map((n) => ({
-          ...n,
-          data: {
-            ...n.data,
-            revealOrder: orderMap.get(n.id) ?? 0,
-            isRevealed: false,
-          },
-        }));
+          const revealNodes = nodes.map((n) => ({
+            ...n,
+            data: {
+              ...n.data,
+              revealOrder: orderMap.get(n.id) ?? 0,
+              isRevealed: false,
+            },
+          }));
 
-        const revealEdges = edges.map((e) => ({
-          ...e,
-          data: { ...e.data, isVisible: false },
-        }));
+          const revealEdges = edges.map((e) => ({
+            ...e,
+            data: { ...e.data, isVisible: false },
+          }));
 
-        setFlowNodes(revealNodes);
-        setFlowEdges(revealEdges);
-        setRevealCounter(-1);
-      }
-    });
+          setFlowNodes(revealNodes);
+          setFlowEdges(revealEdges);
+          setRevealCounter(-1);
+        }
+      })
+      .catch((err) => {
+        if (err?.name !== "AbortError") {
+          console.error("Layout failed:", err);
+        }
+      });
+
+    return () => {
+      controller.abort();
+      fitViewTimers.forEach(clearTimeout);
+    };
     // expandedNodes is intentionally NOT in the dependency array.
     // Expand/collapse is handled by a separate effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps

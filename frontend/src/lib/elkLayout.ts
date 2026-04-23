@@ -1,7 +1,6 @@
-import ELK from "elkjs/lib/elk.bundled.js";
+import type { ElkNode } from "elkjs/lib/elk.bundled.js";
 import type { Node, Edge } from "reactflow";
-
-const elk = new ELK();
+import ElkWorker from "./elkWorker?worker";
 
 const COMPACT_WIDTH = 280;
 const COMPACT_HEIGHT = 52;
@@ -16,10 +15,66 @@ export interface LayoutResult {
   edges: Edge[];
 }
 
+// Lazy-spawned long-lived worker. ELK init is heavy (~1s cold),
+// so we pay that cost once and reuse across layout calls.
+let worker: Worker | null = null;
+let nextRequestId = 1;
+const pending = new Map<
+  number,
+  { resolve: (r: ElkNode) => void; reject: (e: Error) => void }
+>();
+
+function getWorker(): Worker {
+  if (worker) return worker;
+  const w = new ElkWorker();
+  w.onmessage = (
+    e: MessageEvent<{ id: number; result?: ElkNode; error?: string }>
+  ) => {
+    const handler = pending.get(e.data.id);
+    if (!handler) return; // aborted — drop stale result
+    pending.delete(e.data.id);
+    if (e.data.error) handler.reject(new Error(e.data.error));
+    else if (e.data.result) handler.resolve(e.data.result);
+    else handler.reject(new Error("Worker returned empty result"));
+  };
+  w.onerror = (e) => {
+    // Reject everything still pending; the worker is in an unknown state
+    for (const [, h] of pending) h.reject(new Error(`Worker error: ${e.message}`));
+    pending.clear();
+    worker = null;
+  };
+  worker = w;
+  return w;
+}
+
+function runLayoutInWorker(
+  graph: ElkNode,
+  signal?: AbortSignal
+): Promise<ElkNode> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Layout aborted", "AbortError"));
+      return;
+    }
+    const id = nextRequestId++;
+    pending.set(id, { resolve, reject });
+    if (signal) {
+      const onAbort = () => {
+        if (pending.delete(id)) {
+          reject(new DOMException("Layout aborted", "AbortError"));
+        }
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    getWorker().postMessage({ id, graph });
+  });
+}
+
 export async function layoutGraph(
   nodes: Node[],
   edges: Edge[],
-  expandedNodes: Set<string>
+  expandedNodes: Set<string>,
+  signal?: AbortSignal
 ): Promise<LayoutResult> {
   // Separate connected nodes from orphans (no edges at all)
   const connectedIds = new Set<string>();
@@ -50,8 +105,7 @@ export async function layoutGraph(
     targets: [edge.target],
   }));
 
-  // Layout connected nodes with ELK
-  const graph = await elk.layout({
+  const graph: ElkNode = {
     id: "root",
     layoutOptions: {
       "elk.algorithm": "layered",
@@ -70,21 +124,23 @@ export async function layoutGraph(
     },
     children: connectedNodes.map(toElkNode),
     edges: elkEdges,
-  });
+  };
+
+  const laidOut = await runLayoutInWorker(graph, signal);
 
   // Find the bottom of the connected graph
   let graphBottom = 0;
-  let graphLeft = 60;
-  for (const child of graph.children || []) {
+  const graphLeft = 60;
+  for (const child of laidOut.children || []) {
     const bottom = (child.y || 0) + (child.height || COMPACT_HEIGHT);
     if (bottom > graphBottom) graphBottom = bottom;
   }
 
   // Position orphan nodes in rows below the main graph
   // Flow left-to-right, 10 per row, with enough gap to avoid overlap
-  const ORPHAN_GAP_Y = 100; // gap between connected graph and orphan section
-  const ORPHAN_NODE_GAP = 60; // horizontal gap between orphan nodes
-  const ORPHAN_ROW_GAP = 50; // vertical gap between orphan rows
+  const ORPHAN_GAP_Y = 100;
+  const ORPHAN_NODE_GAP = 60;
+  const ORPHAN_ROW_GAP = 50;
   const ORPHAN_PER_ROW = 10;
   const orphanStartY = connectedNodes.length > 0 ? graphBottom + ORPHAN_GAP_Y : 60;
 
@@ -100,15 +156,13 @@ export async function layoutGraph(
       countInRow = 0;
     }
     orphanPositions.set(node.id, { x: currentX, y: currentY });
-    // Estimate width based on name length (wider names need more space)
     const nameWidth = Math.max(COMPACT_WIDTH, (node.data?.name?.length || 15) * 11 + 120);
     currentX += nameWidth + ORPHAN_NODE_GAP;
     countInRow++;
   });
 
-  // Merge positions
   const positionedNodes = nodes.map((node) => {
-    const elkNode = graph.children?.find((n) => n.id === node.id);
+    const elkNode = laidOut.children?.find((n) => n.id === node.id);
     const orphanPos = orphanPositions.get(node.id);
 
     return {
