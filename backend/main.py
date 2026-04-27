@@ -263,6 +263,59 @@ async def health_check():
     return {"status": "ok", "version": app.version}
 
 
+@app.get("/metrics")
+async def metrics(request: Request):
+    """Prometheus-compatible text exposition — admin-gated.
+
+    Exposes cache + request metrics so an external system (Databricks AI/BI
+    dashboard, Prometheus, Datadog via the statsd sidecar, etc.) can scrape
+    and graph them over time. Requires admin access because the metrics
+    reveal internal state (cache size, inflight fetches, latency
+    distribution) that shouldn't be public on a Databricks App URL.
+    """
+    _, is_admin = await asyncio.to_thread(_get_user_info, request)
+    if not is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from backend.lineage_service import get_cache_snapshot, CACHE_MAX_MEMORY_MB
+
+    entries, total_bytes, inflight = get_cache_snapshot()
+
+    with _metrics_lock:
+        latencies = sorted([l for _, l in _request_latencies])
+    p50 = latencies[len(latencies) // 2] if latencies else 0
+    p95 = latencies[int(len(latencies) * 0.95)] if latencies else 0
+    p99 = latencies[int(len(latencies) * 0.99)] if latencies else 0
+
+    lines = [
+        "# HELP lineage_app_uptime_seconds How long the app has been running",
+        "# TYPE lineage_app_uptime_seconds counter",
+        f"lineage_app_uptime_seconds {time.time() - _start_time:.0f}",
+        "# HELP lineage_app_requests_total Total requests served since startup",
+        "# TYPE lineage_app_requests_total counter",
+        f"lineage_app_requests_total {_request_count}",
+        "# HELP lineage_app_latency_ms Request latency in milliseconds",
+        "# TYPE lineage_app_latency_ms summary",
+        f'lineage_app_latency_ms{{quantile="0.5"}} {p50:.1f}',
+        f'lineage_app_latency_ms{{quantile="0.95"}} {p95:.1f}',
+        f'lineage_app_latency_ms{{quantile="0.99"}} {p99:.1f}',
+        "# HELP lineage_cache_entries Number of items currently cached",
+        "# TYPE lineage_cache_entries gauge",
+        f"lineage_cache_entries {len(entries)}",
+        "# HELP lineage_cache_bytes Total bytes used by the cache",
+        "# TYPE lineage_cache_bytes gauge",
+        f"lineage_cache_bytes {total_bytes}",
+        "# HELP lineage_cache_max_bytes Configured cache memory cap",
+        "# TYPE lineage_cache_max_bytes gauge",
+        f"lineage_cache_max_bytes {CACHE_MAX_MEMORY_MB * 1024 * 1024}",
+        "# HELP lineage_cache_inflight Cache keys being fetched right now",
+        "# TYPE lineage_cache_inflight gauge",
+        f"lineage_cache_inflight {len(inflight)}",
+    ]
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse("\n".join(lines) + "\n")
+
+
 @app.get("/api/admin/status")
 async def api_admin_status(request: Request):
     """Admin-only utilization dashboard — returns system metrics and cache status."""

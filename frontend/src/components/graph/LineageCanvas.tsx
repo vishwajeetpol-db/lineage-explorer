@@ -768,6 +768,38 @@ function LineageCanvas() {
         />
       </ReactFlow>
 
+      {/* Large-graph hint — auto-hides after 6s.
+          Since ELK layout runs on the main thread, graphs with many nodes
+          can briefly freeze the UI during layout. This tells users that's
+          expected, not a bug. Threshold is empirical: below 300 nodes the
+          freeze is imperceptible. */}
+      {viewNodes.length > 300 && (
+        <AnimatePresence>
+          <motion.div
+            key={`large-graph-hint-${viewNodes.length}`}
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.3 }}
+            className="
+              absolute top-3 left-1/2 -translate-x-1/2 z-20
+              flex items-center gap-2 px-3 py-1.5 rounded-lg
+              bg-amber-500/10 border border-amber-500/25 backdrop-blur-md
+              text-amber-200 text-[11px] font-medium
+              shadow-[0_2px_12px_rgba(0,0,0,0.3)]
+            "
+            onAnimationComplete={() => {
+              setTimeout(() => {
+                const el = document.querySelector(`[data-key="large-graph-hint-${viewNodes.length}"]`);
+                if (el) (el as HTMLElement).style.display = "none";
+              }, 6000);
+            }}
+          >
+            Large graph ({viewNodes.length} nodes) — layout may take a few seconds
+          </motion.div>
+        </AnimatePresence>
+      )}
+
       {/* Reset Layout button */}
       <button
         onClick={handleResetLayout}

@@ -1,6 +1,7 @@
-import type { ElkNode } from "elkjs/lib/elk.bundled.js";
+import ELK from "elkjs/lib/elk.bundled.js";
 import type { Node, Edge } from "reactflow";
-import ElkWorker from "./elkWorker?worker";
+
+const elk = new ELK();
 
 const COMPACT_WIDTH = 280;
 const COMPACT_HEIGHT = 52;
@@ -15,67 +16,20 @@ export interface LayoutResult {
   edges: Edge[];
 }
 
-// Lazy-spawned long-lived worker. ELK init is heavy (~1s cold),
-// so we pay that cost once and reuse across layout calls.
-let worker: Worker | null = null;
-let nextRequestId = 1;
-const pending = new Map<
-  number,
-  { resolve: (r: ElkNode) => void; reject: (e: Error) => void }
->();
-
-function getWorker(): Worker {
-  if (worker) return worker;
-  const w = new ElkWorker();
-  w.onmessage = (
-    e: MessageEvent<{ id: number; result?: ElkNode; error?: string }>
-  ) => {
-    const handler = pending.get(e.data.id);
-    if (!handler) return; // aborted — drop stale result
-    pending.delete(e.data.id);
-    if (e.data.error) handler.reject(new Error(e.data.error));
-    else if (e.data.result) handler.resolve(e.data.result);
-    else handler.reject(new Error("Worker returned empty result"));
-  };
-  w.onerror = (e) => {
-    // Reject everything still pending; the worker is in an unknown state
-    for (const [, h] of pending) h.reject(new Error(`Worker error: ${e.message}`));
-    pending.clear();
-    worker = null;
-  };
-  worker = w;
-  return w;
-}
-
-function runLayoutInWorker(
-  graph: ElkNode,
-  signal?: AbortSignal
-): Promise<ElkNode> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new DOMException("Layout aborted", "AbortError"));
-      return;
-    }
-    const id = nextRequestId++;
-    pending.set(id, { resolve, reject });
-    if (signal) {
-      const onAbort = () => {
-        if (pending.delete(id)) {
-          reject(new DOMException("Layout aborted", "AbortError"));
-        }
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-    }
-    getWorker().postMessage({ id, graph });
-  });
-}
-
+// ELK runs on the main thread. Cancellation is provided via an optional
+// AbortSignal: if the signal aborts before the layout completes, the
+// promise rejects with an AbortError so stale results can't overwrite
+// a newer graph.
 export async function layoutGraph(
   nodes: Node[],
   edges: Edge[],
   expandedNodes: Set<string>,
   signal?: AbortSignal
 ): Promise<LayoutResult> {
+  if (signal?.aborted) {
+    throw new DOMException("Layout aborted", "AbortError");
+  }
+
   // Separate connected nodes from orphans (no edges at all)
   const connectedIds = new Set<string>();
   for (const edge of edges) {
@@ -105,7 +59,7 @@ export async function layoutGraph(
     targets: [edge.target],
   }));
 
-  const graph: ElkNode = {
+  const graph = await elk.layout({
     id: "root",
     layoutOptions: {
       "elk.algorithm": "layered",
@@ -124,20 +78,21 @@ export async function layoutGraph(
     },
     children: connectedNodes.map(toElkNode),
     edges: elkEdges,
-  };
+  });
 
-  const laidOut = await runLayoutInWorker(graph, signal);
+  if (signal?.aborted) {
+    throw new DOMException("Layout aborted", "AbortError");
+  }
 
   // Find the bottom of the connected graph
   let graphBottom = 0;
   const graphLeft = 60;
-  for (const child of laidOut.children || []) {
+  for (const child of graph.children || []) {
     const bottom = (child.y || 0) + (child.height || COMPACT_HEIGHT);
     if (bottom > graphBottom) graphBottom = bottom;
   }
 
   // Position orphan nodes in rows below the main graph
-  // Flow left-to-right, 10 per row, with enough gap to avoid overlap
   const ORPHAN_GAP_Y = 100;
   const ORPHAN_NODE_GAP = 60;
   const ORPHAN_ROW_GAP = 50;
@@ -162,7 +117,7 @@ export async function layoutGraph(
   });
 
   const positionedNodes = nodes.map((node) => {
-    const elkNode = laidOut.children?.find((n) => n.id === node.id);
+    const elkNode = graph.children?.find((n) => n.id === node.id);
     const orphanPos = orphanPositions.get(node.id);
 
     return {
