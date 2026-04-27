@@ -14,6 +14,21 @@ table_dependancy_graph
 *.pem
 *.key
 
+# Local-only test scaffolding (kept on disk for local runs, never shipped or committed).
+# Reasons: not wired into any CI; contains workspace-specific defaults; would otherwise
+# bake customer values into versioned code and violate the "zero-code, any-workspace" deploy promise.
+tests/
+backend/tests/
+monitoring/
+pytest.ini
+requirements-dev.txt
+refresh_job/
+
+# Local-only demo/setup scripts (run by author against own workspace; not for customer envs).
+setup_demo_lineage.py
+create_stress_test.py
+generate_stress_test.py
+
 # IDE / OS
 .DS_Store
 .idea/

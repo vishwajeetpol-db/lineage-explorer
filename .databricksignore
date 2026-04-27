@@ -21,7 +21,13 @@ __pycache__/
 *.pyc
 create_stress_test.py
 generate_stress_test.py
+setup_demo_lineage.py
 refresh_job/
+tests/
+backend/tests/
+monitoring/
+pytest.ini
+requirements-dev.txt
 
 # Repo metadata
 .git/
