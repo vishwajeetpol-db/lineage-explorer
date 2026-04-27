@@ -469,42 +469,6 @@ def _parse_lineage_ref(table_full_name: str | None, path: str | None, ref_type: 
     return None, None
 
 
-def _parse_lineage_ref(table_full_name: str | None, path: str | None, ref_type: str | None) -> tuple[str | None, str | None]:
-    """Parse a lineage source/target into (node_id, node_type).
-
-    Returns a stable node ID and a type string suitable for TableNode.table_type.
-    Handles tables, views, streaming tables, volumes (/Volumes/...), and cloud paths (s3://).
-    """
-    if table_full_name:
-        type_map = {
-            "TABLE": "TABLE",
-            "VIEW": "VIEW",
-            "MATERIALIZED_VIEW": "MATERIALIZED_VIEW",
-            "STREAMING_TABLE": "STREAMING_TABLE",
-        }
-        return table_full_name, type_map.get(ref_type, ref_type or "TABLE")
-
-    if path:
-        # Volume path: /Volumes/catalog/schema/volume_name/...
-        if path.startswith("/Volumes/"):
-            parts = path.split("/")
-            if len(parts) >= 5:
-                vol_id = f"{parts[2]}.{parts[3]}.{parts[4]}"
-                return vol_id, "VOLUME"
-            return f"volume:{path}", "VOLUME"
-
-        # Cloud storage path: s3://bucket/..., abfss://container@account/...
-        if "://" in path:
-            proto, rest = path.split("://", 1)
-            bucket = rest.split("/")[0]
-            return f"path:{proto}://{bucket}", "PATH"
-
-        # Other path
-        return f"path:{path[:80]}", "PATH"
-
-    return None, None
-
-
 def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageResponse:
     """Actual DBSQL fetch — called by at most one thread per cache key at a time."""
     client = _get_client()
@@ -877,32 +841,6 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
                     nodes_map[entity_key].cost_usd = cost_by_job[info["id"]]
         except Exception as e:
             logger.warning(f"Serverless job cost query failed (ensure SELECT on system.billing is granted): {e}")
-
-    # Pipeline (DLT) costs — uses usage_metadata.dlt_pipeline_id
-    pipeline_ids = [info["id"] for info in entity_map.values() if info["type"] == "PIPELINE"]
-    if pipeline_ids and price_per_dbu > 0:
-        pipeline_id_list = ",".join(f"'{pid}'" for pid in pipeline_ids)
-        dlt_dbu_sql = f"""
-        SELECT
-            usage_metadata.dlt_pipeline_id AS pipeline_id,
-            SUM(usage_quantity) AS total_dbu
-        FROM system.billing.usage
-        WHERE usage_metadata.dlt_pipeline_id IN ({pipeline_id_list})
-            AND usage_date > current_date() - INTERVAL 30 DAYS
-        GROUP BY usage_metadata.dlt_pipeline_id
-        """
-        try:
-            dlt_rows = _execute_sql(client, dlt_dbu_sql)
-            cost_by_pipeline: dict[str, float] = {}
-            for cr in dlt_rows:
-                dbu = float(cr["total_dbu"])
-                cost_by_pipeline[str(cr["pipeline_id"])] = round(dbu * price_per_dbu, 2)
-
-            for entity_key, info in entity_map.items():
-                if info["type"] == "PIPELINE" and info["id"] in cost_by_pipeline:
-                    nodes_map[entity_key].cost_usd = cost_by_pipeline[info["id"]]
-        except Exception as e:
-            logger.warning(f"DLT pipeline cost query failed (ensure SELECT on system.billing is granted): {e}")
 
     # Pipeline (DLT) costs — uses usage_metadata.dlt_pipeline_id
     pipeline_ids = [info["id"] for info in entity_map.values() if info["type"] == "PIPELINE"]
