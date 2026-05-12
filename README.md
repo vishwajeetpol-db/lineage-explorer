@@ -1,6 +1,3 @@
-<details>
-<summary><b>Lineage Explorer — interactive DAG for Unity Catalog (click to expand banner)</b></summary>
-
 ```
     __    _                                ______           __
    / /   (_)___  ___  ____ _____ ____     / ____/  ______  / /___  ________  _____
@@ -78,8 +75,6 @@
 
   4,000 users.  1 SQL query.  Zero code to deploy.
 ```
-
-</details>
 
 # Lineage Explorer
 
@@ -849,6 +844,7 @@ env:
 | `GET` | `/api/column-lineage?catalog=X&schema=Y&table=Z&column=W` | Column-level lineage for a single column |
 | `GET` | `/api/entity-name?entity_type=X&entity_id=Y` | Entity display name |
 | `POST` | `/api/cache/invalidate` | Clear cache (localhost only) |
+| `POST` | `/api/admin/evict-cache` | Evict a specific cache key (admin-only) |
 
 All identifier parameters are validated: alphanumeric + underscores, max 255 chars.
 
@@ -874,10 +870,9 @@ cd frontend && npm install && npm run dev
 
 ```
 lineage-explorer/
-+-- databricks.yml              # DABs config -- single source of truth for deployment
++-- databricks.yml              # DABs config -- single source of truth for deployment (includes sync.exclude for dev files)
 +-- requirements.txt            # Python deps (pinned ranges)
 +-- .gitignore
-+-- .databricksignore           # Excludes dev files from app deployment
 +-- backend/
 |   +-- __init__.py
 |   +-- main.py                 # FastAPI app, middleware, admin dashboard, rate limiting
