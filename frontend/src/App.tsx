@@ -11,20 +11,20 @@ const TABLE_LOAD_MAX_RETRIES = 3;
 const TABLE_LOAD_RETRY_DELAY = 2000; // ms between retries
 
 export default function App() {
-  const {
-    focusTable, catalog, schema, liveMode,
-    setFocusTable, setLineageData, setError, setAllTables, setAllTablesLoading,
-  } = useLineageStore();
-  const setIsAdmin = useLineageStore((s) => s.setIsAdmin);
+  const focusTable = useLineageStore((s) => s.focusTable);
+  const catalog = useLineageStore((s) => s.catalog);
+  const schema = useLineageStore((s) => s.schema);
+  const liveMode = useLineageStore((s) => s.liveMode);
   const isAdmin = useLineageStore((s) => s.isAdmin);
   const retryCount = useRef(0);
+  const lineageAbortRef = useRef<AbortController | null>(null);
   const [adminPage, setAdminPage] = useState(false);
 
   // Fetch user info (admin status) on mount, then process deep link if present
   useEffect(() => {
     api.getUserInfo()
-      .then((info) => setIsAdmin(info.isAdmin))
-      .catch(() => setIsAdmin(false))
+      .then((info) => useLineageStore.getState().setIsAdmin(info.isAdmin))
+      .catch(() => useLineageStore.getState().setIsAdmin(false))
       .finally(() => {
         const params = new URLSearchParams(window.location.search);
 
@@ -44,63 +44,80 @@ export default function App() {
           useLineageStore.setState({ loading: true, error: null });
           api.getLineage(parts[0], parts[1])
             .then((data) => {
-              setLineageData(data.nodes, data.edges, data.cached, data.cached_at, data.cache_expires_at, data.fetch_duration_ms);
+              useLineageStore.getState().setLineageData({
+                nodes: data.nodes,
+                edges: data.edges,
+                cached: data.cached,
+                cachedAt: data.cached_at,
+                cacheExpiresAt: data.cache_expires_at,
+                fetchDurationMs: data.fetch_duration_ms,
+              });
             })
             .catch((err: any) => {
-              setError(err.message || "Failed to load lineage data");
+              useLineageStore.getState().setError(err.message || "Failed to load lineage data");
             });
         }
       });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Load all tables on mount with retry logic
+  // Load all tables on mount with retry — only retry on transient failures.
+  // Auth/permission errors (4xx) are NOT retried; they signal a real config issue.
   const loadTables = useCallback(() => {
-    setAllTablesLoading(true);
+    useLineageStore.getState().setAllTablesLoading(true);
     api.getTables()
       .then((r) => {
         if (r.tables.length > 0) {
           retryCount.current = 0;
-          setAllTables(r.tables);
+          useLineageStore.getState().setAllTables(r.tables);
         } else if (retryCount.current < TABLE_LOAD_MAX_RETRIES) {
-          // Backend might still be preloading — retry
+          // Empty result — backend might still be preloading. Retry.
           retryCount.current++;
           setTimeout(loadTables, TABLE_LOAD_RETRY_DELAY);
         } else {
-          setAllTables([]);
+          useLineageStore.getState().setAllTables([]);
         }
       })
-      .catch((e) => {
+      .catch((e: any) => {
         console.error("Failed to load tables:", e);
-        if (retryCount.current < TABLE_LOAD_MAX_RETRIES) {
+        const msg = String(e?.message || "");
+        const is4xx = /API error 4\d\d/.test(msg);
+        if (!is4xx && retryCount.current < TABLE_LOAD_MAX_RETRIES) {
           retryCount.current++;
           setTimeout(loadTables, TABLE_LOAD_RETRY_DELAY);
         } else {
-          setAllTablesLoading(false);
+          useLineageStore.getState().setAllTablesLoading(false);
         }
       });
-  }, [setAllTables, setAllTablesLoading]);
+  }, []);
 
   useEffect(() => {
     loadTables();
   }, [loadTables]);
 
-  // Auto-fetch lineage when focusTable is selected
+  // Auto-fetch lineage when focusTable is selected. Cancels any in-flight
+  // request so quick table switches don't race.
   const fetchLineage = useCallback(async (cat: string, sch: string) => {
-    setLiveMode(liveMode);
+    setLiveMode(useLineageStore.getState().liveMode);
+    lineageAbortRef.current?.abort();
+    const controller = new AbortController();
+    lineageAbortRef.current = controller;
     useLineageStore.setState({ loading: true, error: null });
-    const minDisplay = liveMode ? 2500 : 1200;
-    const start = Date.now();
     try {
-      const data = await api.getLineage(cat, sch);
-      const elapsed = Date.now() - start;
-      if (elapsed < minDisplay) {
-        await new Promise((r) => setTimeout(r, minDisplay - elapsed));
-      }
-      setLineageData(data.nodes, data.edges, data.cached, data.cached_at, data.cache_expires_at, data.fetch_duration_ms);
+      const data = await api.getLineage(cat, sch, controller.signal);
+      if (controller.signal.aborted) return;
+      useLineageStore.getState().setLineageData({
+        nodes: data.nodes,
+        edges: data.edges,
+        cached: data.cached,
+        cachedAt: data.cached_at,
+        cacheExpiresAt: data.cache_expires_at,
+        fetchDurationMs: data.fetch_duration_ms,
+      });
     } catch (err: any) {
-      setError(err.message || "Failed to load lineage data");
+      if (err?.name === "AbortError") return;
+      useLineageStore.getState().setError(err.message || "Failed to load lineage data");
     }
-  }, [liveMode, setLineageData, setError]);
+  }, []);
 
   // Re-fetch lineage immediately when live mode is toggled (if a table is already selected)
   const prevLiveMode = useRef(liveMode);
@@ -112,10 +129,10 @@ export default function App() {
   }, [liveMode, focusTable, catalog, schema, fetchLineage]);
 
   const handleSelectTable = useCallback((fqdn: string) => {
-    setFocusTable(fqdn);
+    useLineageStore.getState().setFocusTable(fqdn);
     const parts = fqdn.split(".");
     fetchLineage(parts[0], parts[1]);
-  }, [setFocusTable, fetchLineage]);
+  }, [fetchLineage]);
 
   const handleGenerate = useCallback(async () => {
     if (!catalog || !schema) return;

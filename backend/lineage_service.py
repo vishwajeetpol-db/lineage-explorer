@@ -21,6 +21,7 @@ import sys
 import time
 import logging
 import threading
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Callable, TypeVar
 from cachetools import TTLCache
@@ -107,8 +108,11 @@ _cache: TTLCache[str, _CacheEntry] = TTLCache(
 )
 _cache_lock = threading.RLock()
 
-# Per-key locks for single-flight. Reused across calls, created lazily.
-_keyed_locks: dict[str, threading.Lock] = {}
+# Per-key locks for single-flight. LRU-bounded so we don't leak a lock
+# per cache key forever (each unique `columns:*` key would otherwise stick
+# around for the lifetime of the process).
+_KEYED_LOCKS_MAX = max(1024, CACHE_MAX_ENTRIES)
+_keyed_locks: "OrderedDict[str, threading.Lock]" = OrderedDict()
 _keyed_locks_guard = threading.Lock()
 
 
@@ -118,6 +122,16 @@ def _get_keyed_lock(key: str) -> threading.Lock:
         if lock is None:
             lock = threading.Lock()
             _keyed_locks[key] = lock
+        else:
+            _keyed_locks.move_to_end(key)
+        # Evict oldest unlocked locks once we exceed the cap.
+        while len(_keyed_locks) > _KEYED_LOCKS_MAX:
+            oldest_key, oldest_lock = next(iter(_keyed_locks.items()))
+            if oldest_lock.locked():
+                # Don't evict an in-use lock; rotate it to most-recent and stop.
+                _keyed_locks.move_to_end(oldest_key)
+                break
+            _keyed_locks.popitem(last=False)
         return lock
 
 
@@ -810,10 +824,11 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
     # Cost = DBUs * list price per DBU (per official Databricks docs).
     #   https://docs.databricks.com/aws/en/admin/usage/system-tables
     #
-    # Performance: list price is cached globally (24h TTL) — only the fast
-    # DBU aggregation queries run per schema load. Entire result is then cached
-    # with the lineage response — zero extra queries on repeat visits.
-    price_per_dbu = _get_serverless_price(client)
+    # Performance: list price is cached globally (24h TTL) and pre-fetched
+    # at startup. Use the non-blocking accessor here so the hot lineage path
+    # never stalls on a cold price cache; cost simply renders on the next
+    # load after the background prefetch completes.
+    price_per_dbu = _get_serverless_price_cached()
 
     # Job costs (serverless)
     job_ids = [info["id"] for info in entity_map.values() if info["type"] == "JOB"]
@@ -924,54 +939,69 @@ def _fetch_table_lineage(catalog: str, schema: str, cache_key: str) -> LineageRe
 
 
 def resolve_entity_name(entity_type: str, entity_id: str) -> dict:
-    """Resolve an entity ID to display name + metadata via system tables. Coalesced + cached."""
+    """Resolve an entity ID to display name + metadata via system tables.
+
+    Successful lookups are cached for the standard TTL. Fallbacks
+    (resolution failed, no row found) are NOT cached so a transient lookup
+    error can't stick a bad name in the cache for 8 hours.
+    """
     cache_key = f"entity_name:{entity_type}:{entity_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
 
-    def _fetch() -> dict:
-        client = _get_client()
-        result = {"name": f"{entity_type} {entity_id[:12]}"}
-        try:
-            if entity_type == "JOB":
-                rows = _execute_sql(client, f"""
-                    SELECT name, run_as_user_name, creator_user_name
-                    FROM system.lakeflow.jobs
-                    WHERE job_id = '{entity_id}'
+    fallback_name = f"{entity_type} {entity_id[:12]}"
+    resolved = False
+    result: dict = {"name": fallback_name}
+
+    client = _get_client()
+    try:
+        if entity_type == "JOB":
+            rows = _execute_sql(client, f"""
+                SELECT name, run_as_user_name, creator_user_name
+                FROM system.lakeflow.jobs
+                WHERE job_id = '{entity_id}'
+                LIMIT 1
+            """)
+            if rows:
+                r = rows[0]
+                if r.get("name"):
+                    result["name"] = r["name"]
+                    resolved = True
+                result["owner"] = r.get("run_as_user_name") or r.get("creator_user_name")
+        elif entity_type == "PIPELINE":
+            rows = _execute_sql(client, f"""
+                SELECT name FROM system.lakeflow.pipelines
+                WHERE pipeline_id = '{entity_id}'
+                LIMIT 1
+            """)
+            if rows and rows[0].get("name"):
+                result["name"] = rows[0]["name"]
+                resolved = True
+        elif entity_type == "NOTEBOOK":
+            if "/" in entity_id:
+                result["name"] = entity_id.split("/")[-1]
+                resolved = True
+            else:
+                # Numeric workspace object ID — resolve via audit log
+                nb_rows = _execute_sql(client, f"""
+                    SELECT request_params['path'] AS path
+                    FROM system.access.audit
+                    WHERE request_params['notebookId'] = '{entity_id}'
+                      AND request_params['path'] IS NOT NULL
                     LIMIT 1
                 """)
-                if rows:
-                    r = rows[0]
-                    if r.get("name"):
-                        result["name"] = r["name"]
-                    result["owner"] = r.get("run_as_user_name") or r.get("creator_user_name")
-            elif entity_type == "PIPELINE":
-                rows = _execute_sql(client, f"""
-                    SELECT name FROM system.lakeflow.pipelines
-                    WHERE pipeline_id = '{entity_id}'
-                    LIMIT 1
-                """)
-                if rows and rows[0].get("name"):
-                    result["name"] = rows[0]["name"]
-            elif entity_type == "NOTEBOOK":
-                if "/" in entity_id:
-                    result["name"] = entity_id.split("/")[-1]
+                if nb_rows and nb_rows[0].get("path"):
+                    result["name"] = nb_rows[0]["path"].rsplit("/", 1)[-1]
+                    resolved = True
                 else:
-                    # Numeric workspace object ID — resolve via audit log
-                    nb_rows = _execute_sql(client, f"""
-                        SELECT request_params['path'] AS path
-                        FROM system.access.audit
-                        WHERE request_params['notebookId'] = '{entity_id}'
-                          AND request_params['path'] IS NOT NULL
-                        LIMIT 1
-                    """)
-                    if nb_rows and nb_rows[0].get("path"):
-                        result["name"] = nb_rows[0]["path"].rsplit("/", 1)[-1]
-                    else:
-                        result["name"] = f"Notebook {entity_id[:12]}"
-        except Exception as e:
-            logger.warning(f"Failed to resolve {entity_type} {entity_id}: {e}")
-        return result
+                    result["name"] = f"Notebook {entity_id[:12]}"
+    except Exception as e:
+        logger.warning(f"Failed to resolve {entity_type} {entity_id}: {e}")
 
-    return _cached_fetch(cache_key, _fetch)
+    if resolved:
+        _cache_set(cache_key, result)
+    return result
 
 
 def get_columns(catalog: str, schema: str, table: str, skip_cache: bool = False) -> list[dict]:

@@ -54,7 +54,14 @@ interface LineageState {
   setDiscountPercent: (percent: number) => void;
   setCatalogs: (catalogs: string[]) => void;
   setSchemas: (schemas: string[]) => void;
-  setLineageData: (nodes: GraphNode[], edges: LineageEdge[], cached?: boolean, cachedAt?: string | null, cacheExpiresAt?: string | null, fetchDurationMs?: number | null) => void;
+  setLineageData: (data: {
+    nodes: GraphNode[];
+    edges: LineageEdge[];
+    cached?: boolean;
+    cachedAt?: string | null;
+    cacheExpiresAt?: string | null;
+    fetchDurationMs?: number | null;
+  }) => void;
   setColumnEdges: (edges: ColumnLineageEdge[]) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
@@ -117,7 +124,17 @@ export const useLineageStore = create<LineageState>((set) => ({
   setDiscountPercent: (percent) => set({ discountPercent: Math.max(0, Math.min(99, percent)) }),
   setCatalogs: (catalogs) => set({ catalogs }),
   setSchemas: (schemas) => set({ schemas }),
-  setLineageData: (nodes, edges, cached, cachedAt, cacheExpiresAt, fetchDurationMs) => set({ nodes, edges, loading: false, error: null, cached: cached ?? false, cachedAt: cachedAt ?? null, cacheExpiresAt: cacheExpiresAt ?? null, fetchDurationMs: fetchDurationMs ?? null }),
+  setLineageData: ({ nodes, edges, cached, cachedAt, cacheExpiresAt, fetchDurationMs }) =>
+    set({
+      nodes,
+      edges,
+      loading: false,
+      error: null,
+      cached: cached ?? false,
+      cachedAt: cachedAt ?? null,
+      cacheExpiresAt: cacheExpiresAt ?? null,
+      fetchDurationMs: fetchDurationMs ?? null,
+    }),
   setColumnEdges: (columnEdges) => set({ columnEdges }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error, loading: false }),

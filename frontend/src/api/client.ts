@@ -9,8 +9,8 @@ function appendLive(url: string): string {
   return url + (url.includes("?") ? "&" : "?") + "live=true";
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(appendLive(url));
+async function fetchJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(appendLive(url), { signal });
   if (!res.ok) {
     const err = await res.text();
     throw new Error(`API error ${res.status}: ${err}`);
@@ -105,9 +105,10 @@ export const api = {
   getSchemas: (catalog: string) =>
     fetchJson<{ schemas: string[] }>(`${BASE}/schemas?catalog=${encodeURIComponent(catalog)}`),
 
-  getLineage: (catalog: string, schema: string) =>
+  getLineage: (catalog: string, schema: string, signal?: AbortSignal) =>
     fetchJson<LineageResponse>(
-      `${BASE}/lineage?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}`
+      `${BASE}/lineage?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}`,
+      signal,
     ),
 
   getColumnLineage: (catalog: string, schema: string, table: string, column: string) =>

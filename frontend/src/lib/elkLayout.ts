@@ -1,7 +1,14 @@
-import ELK from "elkjs/lib/elk.bundled.js";
+import ELK from "elkjs/lib/elk-api.js";
 import type { Node, Edge } from "reactflow";
 
-const elk = new ELK();
+// Run ELK in a Web Worker so layout of large graphs (200+ nodes) doesn't
+// block the React render loop. `?url` makes Vite emit the worker as a
+// hashed asset and gives us back the runtime URL.
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore — Vite-only `?url` import suffix
+import elkWorkerUrl from "elkjs/lib/elk-worker.min.js?url";
+
+const elk = new ELK({ workerUrl: elkWorkerUrl });
 
 const COMPACT_WIDTH = 280;
 const COMPACT_HEIGHT = 52;
@@ -16,10 +23,10 @@ export interface LayoutResult {
   edges: Edge[];
 }
 
-// ELK runs on the main thread. Cancellation is provided via an optional
-// AbortSignal: if the signal aborts before the layout completes, the
-// promise rejects with an AbortError so stale results can't overwrite
-// a newer graph.
+// ELK runs in a Web Worker (see import above). Cancellation is provided
+// via an optional AbortSignal: if the signal aborts before the layout
+// completes, the promise rejects with an AbortError so stale results
+// can't overwrite a newer graph.
 export async function layoutGraph(
   nodes: Node[],
   edges: Edge[],

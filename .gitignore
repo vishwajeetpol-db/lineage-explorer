@@ -14,15 +14,10 @@ table_dependancy_graph
 *.pem
 *.key
 
-# Local-only test scaffolding (kept on disk for local runs, never shipped or committed).
-# Reasons: not wired into any CI; contains workspace-specific defaults; would otherwise
-# bake customer values into versioned code and violate the "zero-code, any-workspace" deploy promise.
-tests/
-backend/tests/
-monitoring/
-pytest.ini
-requirements-dev.txt
-refresh_job/
+# Local-only load + smoke tests (need a deployed app + costs money to run).
+# Note: backend/tests/ is intentionally tracked so unit tests run in CI.
+tests/load/
+tests/smoke/
 
 # Local-only demo/setup scripts (run by author against own workspace; not for customer envs).
 setup_demo_lineage.py

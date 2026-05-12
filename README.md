@@ -1,3 +1,6 @@
+<details>
+<summary><b>Lineage Explorer — interactive DAG for Unity Catalog (click to expand banner)</b></summary>
+
 ```
     __    _                                ______           __
    / /   (_)___  ___  ____ _____ ____     / ____/  ______  / /___  ________  _____
@@ -75,6 +78,8 @@
 
   4,000 users.  1 SQL query.  Zero code to deploy.
 ```
+
+</details>
 
 # Lineage Explorer
 
@@ -777,6 +782,17 @@ The warehouse is never hit per-click or per-user. Cost is dominated by periodic 
 | Metrics | Admin dashboard shows partial data |
 
 Instead: **64-thread pool** within one process. The app is I/O-bound (waiting on SQL), not CPU-bound.
+
+### Scaling Beyond One Process
+
+Single-process is the right default — it keeps the cache, coalescing, and rate limiter coherent without any external dependencies. When the workload outgrows one app instance:
+
+| Bottleneck | Upgrade Path |
+|---|---|
+| RSS approaches the 6 GB app runtime ceiling | Raise `CACHE_MAX_MEMORY_MB` only if RSS has headroom; otherwise shorten `CACHE_TTL_SECONDS` so old entries expire faster |
+| Sustained P99 latency above 5 s | Move the cache out of process — Lakebase Postgres or a Redis instance — so multiple Uvicorn workers can share state. Replace the `cachetools.TTLCache` with a thin client; keep request coalescing in-process per worker |
+| `cache miss` rate spikes after deploys | Add a Databricks Job that warms the cache on a schedule (`/api/lineage` for the most-trafficked schemas) so first-user-after-restart isn't slow |
+| 4 K concurrent users insufficient | Front the app with multiple instances behind a sticky load balancer. With Lakebase-backed cache, instances stay coherent without sticky sessions |
 
 ### Render Pipeline (275-node graph)
 

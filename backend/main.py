@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sys
@@ -8,6 +9,8 @@ import logging
 import resource
 import threading
 from collections import defaultdict, deque, OrderedDict
+
+APP_VERSION = "1.3.0"
 
 RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("RATE_LIMIT_MAX_REQUESTS", "60"))
 RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "60"))
@@ -47,7 +50,25 @@ from backend.lineage_service import (
     _get_client,
 )
 
-logging.basicConfig(level=logging.INFO)
+class _JsonLogFormatter(logging.Formatter):
+    """Structured JSON logs — one line per record so downstream log queries
+    (Databricks app logs, Datadog, etc.) can filter by level/logger/message."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": round(record.created, 3),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload, default=str)
+
+
+_log_handler = logging.StreamHandler()
+_log_handler.setFormatter(_JsonLogFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[_log_handler], force=True)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -65,9 +86,10 @@ ADMIN_GROUP_NAME = os.environ.get("ADMIN_GROUP_NAME", "admins")
 # Cache: token_hash → (timestamp, email, is_admin)
 # Keyed by token hash so cache is checked BEFORE any API call.
 # LRU eviction at 1000 entries to bound memory.
-_user_info_cache: OrderedDict[str, tuple[float, str, bool]] = OrderedDict()
+_user_info_cache: OrderedDict[str, tuple[float, str | None, bool]] = OrderedDict()
 _user_info_lock = threading.Lock()
-USER_INFO_CACHE_TTL = 300  # 5 minutes
+USER_INFO_CACHE_TTL = 300  # 5 minutes (success)
+USER_INFO_FAIL_TTL = 30  # short TTL for failed lookups so a bad token can't hammer the control plane
 USER_INFO_CACHE_MAX = 1000
 
 
@@ -76,6 +98,8 @@ def _get_user_info(request: Request) -> tuple[str | None, bool]:
 
     Cache keyed by token hash — checked BEFORE API call to avoid
     thundering herd on the control plane. LRU-bounded at 1000 entries.
+    Failed lookups are cached for 30s with email=None so repeated bad
+    tokens don't generate fresh API calls every request.
     """
     user_token = request.headers.get("x-forwarded-access-token")
     if not user_token:
@@ -85,12 +109,14 @@ def _get_user_info(request: Request) -> tuple[str | None, bool]:
     token_hash = hashlib.sha256(user_token.encode()).hexdigest()[:16]
     now = time.time()
 
-    # Check cache FIRST — no API call if fresh
     with _user_info_lock:
         cached = _user_info_cache.get(token_hash)
-        if cached and now - cached[0] < USER_INFO_CACHE_TTL:
-            _user_info_cache.move_to_end(token_hash)
-            return cached[1], cached[2]
+        if cached:
+            ts, email, is_admin = cached
+            ttl = USER_INFO_CACHE_TTL if email is not None else USER_INFO_FAIL_TTL
+            if now - ts < ttl:
+                _user_info_cache.move_to_end(token_hash)
+                return email, is_admin
 
     try:
         host = _get_client().config.host
@@ -114,13 +140,23 @@ def _get_user_info(request: Request) -> tuple[str | None, bool]:
         return email, is_admin
     except Exception as e:
         logger.error(f"Failed to resolve user from x-forwarded-access-token: {e}")
+        with _user_info_lock:
+            _user_info_cache[token_hash] = (now, None, False)
+            _user_info_cache.move_to_end(token_hash)
+            while len(_user_info_cache) > USER_INFO_CACHE_MAX:
+                _user_info_cache.popitem(last=False)
         return None, False
 
 
 # ---------------------------------------------------------------------------
-# Input validation — Databricks identifiers must be alphanumeric + underscores
+# Input validation — Databricks identifiers are alphanumeric + underscore only.
+# Strict regex matches the README contract and forecloses SQL-quote escapes
+# even though identifiers are interpolated through backticks/quotes downstream.
 # ---------------------------------------------------------------------------
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_ .-]{0,254}$")
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]{1,255}$")
+_JOB_ID_RE = re.compile(r"^[0-9]{1,32}$")
+_PIPELINE_ID_RE = re.compile(r"^[a-fA-F0-9-]{8,64}$")
+_NOTEBOOK_ID_RE = re.compile(r"^[A-Za-z0-9_./@ +-]{1,512}$")
 
 
 def _validate_identifier(value: str, name: str) -> str:
@@ -134,6 +170,26 @@ def _validate_identifier(value: str, name: str) -> str:
             detail=f"Invalid {name}: must be alphanumeric with underscores (got '{value[:50]}')",
         )
     return value
+
+
+def _validate_entity_id(entity_type: str, entity_id: str) -> str:
+    """Per-type validation for opaque entity ids interpolated into system table queries."""
+    entity_id = entity_id.strip()
+    if not entity_id:
+        raise HTTPException(status_code=400, detail="entity_id is required")
+    et = entity_type.upper()
+    if et == "JOB":
+        ok = bool(_JOB_ID_RE.match(entity_id))
+    elif et == "PIPELINE":
+        ok = bool(_PIPELINE_ID_RE.match(entity_id))
+    elif et == "NOTEBOOK":
+        ok = bool(_NOTEBOOK_ID_RE.match(entity_id))
+    else:
+        # Unknown entity types are passed through but constrained
+        ok = bool(re.fullmatch(r"[A-Za-z0-9_./@ +-]{1,256}", entity_id))
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"Invalid entity_id for {entity_type}")
+    return entity_id
 
 
 # ---------------------------------------------------------------------------
@@ -152,20 +208,31 @@ async def lifespan(app: FastAPI):
     invalidate_cache()
     # Pre-fetch serverless list price in background so it's ready for first lineage load
     from backend.lineage_service import _get_serverless_price, _get_client
+    prefetch_task: asyncio.Task | None = None
     async def _prefetch_price():
         try:
             client = _get_client()
             await asyncio.to_thread(_get_serverless_price, client)
             logger.info("Serverless list price pre-fetched at startup")
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to pre-fetch serverless price (will retry on first lineage load): {e}")
-    asyncio.create_task(_prefetch_price())
-    yield
-    logger.info("Lineage Explorer shutting down — clearing caches")
-    invalidate_cache()
+    prefetch_task = asyncio.create_task(_prefetch_price())
+    try:
+        yield
+    finally:
+        logger.info("Lineage Explorer shutting down — cancelling background tasks, clearing caches")
+        if prefetch_task and not prefetch_task.done():
+            prefetch_task.cancel()
+            try:
+                await prefetch_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        invalidate_cache()
 
 
-app = FastAPI(title="Lineage Explorer", version="1.2.0", lifespan=lifespan)
+app = FastAPI(title="Lineage Explorer", version=APP_VERSION, lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +309,35 @@ class MetricsMiddleware(BaseHTTPMiddleware):
 app.add_middleware(MetricsMiddleware)
 
 
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Defense-in-depth headers. The Databricks Apps proxy sets some of these,
+    but app-level CSP is the only XSS protection for user-supplied content
+    (table names, owners) rendered in the React shell."""
+
+    CSP = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "  # Vite-built bundle uses inline runtime
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("Content-Security-Policy", self.CSP)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+
 def _safe_error(e: Exception) -> str:
     """Return a sanitized error message safe for API responses (no internal paths/query details)."""
     msg = str(e)
@@ -260,60 +356,7 @@ def _safe_error(e: Exception) -> str:
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": app.version}
-
-
-@app.get("/metrics")
-async def metrics(request: Request):
-    """Prometheus-compatible text exposition — admin-gated.
-
-    Exposes cache + request metrics so an external system (Databricks AI/BI
-    dashboard, Prometheus, Datadog via the statsd sidecar, etc.) can scrape
-    and graph them over time. Requires admin access because the metrics
-    reveal internal state (cache size, inflight fetches, latency
-    distribution) that shouldn't be public on a Databricks App URL.
-    """
-    _, is_admin = await asyncio.to_thread(_get_user_info, request)
-    if not is_admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-    from backend.lineage_service import get_cache_snapshot, CACHE_MAX_MEMORY_MB
-
-    entries, total_bytes, inflight = get_cache_snapshot()
-
-    with _metrics_lock:
-        latencies = sorted([l for _, l in _request_latencies])
-    p50 = latencies[len(latencies) // 2] if latencies else 0
-    p95 = latencies[int(len(latencies) * 0.95)] if latencies else 0
-    p99 = latencies[int(len(latencies) * 0.99)] if latencies else 0
-
-    lines = [
-        "# HELP lineage_app_uptime_seconds How long the app has been running",
-        "# TYPE lineage_app_uptime_seconds counter",
-        f"lineage_app_uptime_seconds {time.time() - _start_time:.0f}",
-        "# HELP lineage_app_requests_total Total requests served since startup",
-        "# TYPE lineage_app_requests_total counter",
-        f"lineage_app_requests_total {_request_count}",
-        "# HELP lineage_app_latency_ms Request latency in milliseconds",
-        "# TYPE lineage_app_latency_ms summary",
-        f'lineage_app_latency_ms{{quantile="0.5"}} {p50:.1f}',
-        f'lineage_app_latency_ms{{quantile="0.95"}} {p95:.1f}',
-        f'lineage_app_latency_ms{{quantile="0.99"}} {p99:.1f}',
-        "# HELP lineage_cache_entries Number of items currently cached",
-        "# TYPE lineage_cache_entries gauge",
-        f"lineage_cache_entries {len(entries)}",
-        "# HELP lineage_cache_bytes Total bytes used by the cache",
-        "# TYPE lineage_cache_bytes gauge",
-        f"lineage_cache_bytes {total_bytes}",
-        "# HELP lineage_cache_max_bytes Configured cache memory cap",
-        "# TYPE lineage_cache_max_bytes gauge",
-        f"lineage_cache_max_bytes {CACHE_MAX_MEMORY_MB * 1024 * 1024}",
-        "# HELP lineage_cache_inflight Cache keys being fetched right now",
-        "# TYPE lineage_cache_inflight gauge",
-        f"lineage_cache_inflight {len(inflight)}",
-    ]
-    from fastapi.responses import PlainTextResponse
-    return PlainTextResponse("\n".join(lines) + "\n")
+    return {"status": "ok", "version": APP_VERSION}
 
 
 @app.get("/api/admin/status")
@@ -560,9 +603,7 @@ async def api_get_schema_column_lineage(
 async def api_entity_name(entity_type: str = Query(...), entity_id: str = Query(...)):
     """Resolve an entity (job/pipeline/notebook) ID to a display name + metadata."""
     entity_type = _validate_identifier(entity_type, "entity_type")
-    entity_id = entity_id.strip()
-    if not entity_id:
-        raise HTTPException(status_code=400, detail="entity_id is required")
+    entity_id = _validate_entity_id(entity_type, entity_id)
     try:
         result = await asyncio.to_thread(resolve_entity_name, entity_type, entity_id)
         return result
@@ -603,10 +644,10 @@ if os.path.exists(static_dir):
 
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
-        # Resolve the absolute path and ensure it stays within static_dir
+        # Resolve the absolute path and ensure it stays within static_dir.
+        # Use os.sep boundary so a sibling like `/static_dirextra` can't pass.
         file_path = os.path.realpath(os.path.join(static_dir, full_path))
-        if not file_path.startswith(static_dir):
-            # Path traversal attempt
+        if not (file_path == static_dir or file_path.startswith(static_dir + os.sep)):
             return FileResponse(os.path.join(static_dir, "index.html"))
         if os.path.isfile(file_path):
             return FileResponse(file_path)

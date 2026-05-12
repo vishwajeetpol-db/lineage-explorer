@@ -4,18 +4,79 @@ bundle:
 variables:
   warehouse_id:
     description: "SQL Warehouse ID for executing queries (required)"
+  cache_ttl_seconds:
+    description: "Cache TTL in seconds for lineage data"
+    default: "28800"
+  cache_max_memory_mb:
+    description: "Max in-memory cache footprint in MB"
+    default: "250"
+  admin_group_name:
+    description: "Workspace group whose members are treated as admins"
+    default: "admins"
+  rate_limit_max_requests:
+    description: "Max requests per user per window"
+    default: "60"
+  rate_limit_window_seconds:
+    description: "Rate-limit window in seconds"
+    default: "60"
+
+# Files excluded from `databricks bundle deploy` uploads.
+# `.databricksignore` is best-effort across CLI versions — `sync.exclude` is authoritative.
+sync:
+  exclude:
+    - ".git"
+    - ".gitignore"
+    - ".databricks"
+    - ".claude"
+    - ".venv"
+    - ".vscode"
+    - ".idea"
+    - "**/__pycache__"
+    - "**/*.pyc"
+    - "**/.DS_Store"
+    - "frontend/node_modules"
+    - "frontend/src"
+    - "frontend/public"
+    - "frontend/index.html"
+    - "frontend/package.json"
+    - "frontend/package-lock.json"
+    - "frontend/tsconfig.json"
+    - "frontend/vite.config.ts"
+    - "frontend/tailwind.config.ts"
+    - "frontend/postcss.config.js"
+    - "tests"
+    - "backend/tests"
+    - "monitoring"
+    - "pytest.ini"
+    - "requirements-dev.txt"
+    - "create_stress_test.py"
+    - "generate_stress_test.py"
+    - "setup_demo_lineage.py"
+    - "*.png"
+    - "ss_*"
+    - "screenshot_*"
+    - ".env"
+    - ".env.*"
+    - "*.pem"
+    - "*.key"
+    - "table_dependancy_graph"
+    - "worspace_details_access_tokens"
+    - "CODEOWNERS"
+    - ".github"
 
 targets:
   dev:
     mode: development
     default: true
-    # No hardcoded host — uses CLI profile:
-    #   databricks bundle deploy -t dev --profile <your-profile> --var warehouse_id=<id>
+    # Host comes from CLI profile:
+    #   databricks bundle deploy -t dev --profile <profile> --var warehouse_id=<id>
+    variables:
+      rate_limit_max_requests: "200"  # higher cap for dev (admin dashboard polls every 10s)
     resources:
       apps:
         lineage-explorer:
           name: lineage-explorer-dev
-          description: "Unity Catalog Lineage Explorer - Interactive DAG visualization"
+          description: "Unity Catalog Lineage Explorer — Interactive DAG visualization (dev)"
           source_code_path: .
           resources:
             - name: sql-warehouse
@@ -33,18 +94,26 @@ targets:
             env:
               - name: DATABRICKS_WAREHOUSE_ID
                 value: ${var.warehouse_id}
+              - name: CACHE_TTL_SECONDS
+                value: ${var.cache_ttl_seconds}
+              - name: CACHE_MAX_MEMORY_MB
+                value: ${var.cache_max_memory_mb}
+              - name: ADMIN_GROUP_NAME
+                value: ${var.admin_group_name}
               - name: RATE_LIMIT_MAX_REQUESTS
-                value: "200"
+                value: ${var.rate_limit_max_requests}
+              - name: RATE_LIMIT_WINDOW_SECONDS
+                value: ${var.rate_limit_window_seconds}
 
   prod:
     mode: production
-    # No hardcoded host — uses CLI profile:
-    #   databricks bundle deploy -t prod --profile <your-profile> --var warehouse_id=<id>
+    # Host comes from CLI profile:
+    #   databricks bundle deploy -t prod --profile <profile> --var warehouse_id=<id>
     resources:
       apps:
         lineage-explorer:
           name: lineage-explorer
-          description: "Unity Catalog Lineage Explorer - Interactive DAG visualization"
+          description: "Unity Catalog Lineage Explorer — Interactive DAG visualization"
           source_code_path: .
           resources:
             - name: sql-warehouse
@@ -62,3 +131,13 @@ targets:
             env:
               - name: DATABRICKS_WAREHOUSE_ID
                 value: ${var.warehouse_id}
+              - name: CACHE_TTL_SECONDS
+                value: ${var.cache_ttl_seconds}
+              - name: CACHE_MAX_MEMORY_MB
+                value: ${var.cache_max_memory_mb}
+              - name: ADMIN_GROUP_NAME
+                value: ${var.admin_group_name}
+              - name: RATE_LIMIT_MAX_REQUESTS
+                value: ${var.rate_limit_max_requests}
+              - name: RATE_LIMIT_WINDOW_SECONDS
+                value: ${var.rate_limit_window_seconds}
