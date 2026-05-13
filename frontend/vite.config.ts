@@ -7,6 +7,10 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // elkjs's commonjs source has require('web-worker') for Node fallback.
+      // Stub it to the native browser Worker so vite doesn't emit a bare
+      // `import "web-worker"` that fails to resolve at runtime.
+      "web-worker": path.resolve(__dirname, "./src/stubs/web-worker.ts"),
     },
   },
   server: {
