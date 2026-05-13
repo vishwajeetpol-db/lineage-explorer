@@ -106,7 +106,7 @@ function Landing({ onSelectTable }: Props) {
         <HeaderMenu variant="floating" />
       </div>
 
-      <div className="relative z-10 flex flex-col items-center gap-10 w-full max-w-2xl px-8 mt-[14vh]">
+      <div className="relative z-10 flex flex-col items-center gap-16 w-full max-w-2xl px-8 mt-[10vh]">
         {/* Header */}
         <motion.div
           initial={{ opacity: 0, y: -8 }}

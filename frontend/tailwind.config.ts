@@ -30,8 +30,11 @@ export default {
         },
       },
       fontFamily: {
-        sans: ["Inter", "system-ui", "sans-serif"],
-        mono: ["JetBrains Mono", "Fira Code", "monospace"],
+        // System font stack — Databricks Apps CSP blocks fonts.googleapis.com,
+        // so we use the OS's native UI font (San Francisco on macOS, Segoe UI
+        // on Windows, etc.) instead of trying to load Inter/JetBrains Mono.
+        sans: ["system-ui", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "Helvetica Neue", "Arial", "sans-serif"],
+        mono: ["ui-monospace", "SFMono-Regular", "Menlo", "Monaco", "Consolas", "Liberation Mono", "Courier New", "monospace"],
       },
       animation: {
         "flow": "flow 2s linear infinite",

@@ -207,7 +207,7 @@ function GlobalSearch({ onSelectTable }: Props) {
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.97, y: -8 }}
             transition={{ duration: 0.15 }}
-            className="fixed top-[15%] left-1/2 -translate-x-1/2 z-[9999] w-[560px] max-w-[90vw]"
+            className="fixed top-[28%] left-1/2 -translate-x-1/2 z-[9999] w-[640px] max-w-[90vw]"
           >
             <div className="bg-surface-100/95 backdrop-blur-xl border border-white/[0.08] rounded-2xl overflow-hidden shadow-[0_20px_60px_rgba(0,0,0,0.5)]">
               {/* Input */}
