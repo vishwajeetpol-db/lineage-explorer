@@ -1,16 +1,24 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { ReactFlowProvider } from "reactflow";
 import Toolbar from "./components/layout/Toolbar";
 import LineageCanvas from "./components/graph/LineageCanvas";
-import LandingPage from "./components/LandingPage";
 import AdminDashboard from "./components/AdminDashboard";
+import Landing from "./components/landing/Landing";
+import GlobalSearch from "./components/landing/GlobalSearch";
+import CatalogListView from "./components/browse/CatalogListView";
+import SchemaListView from "./components/browse/SchemaListView";
+import TableListView from "./components/browse/TableListView";
 import { useLineageStore } from "./store/lineageStore";
 import { api, setLiveMode } from "./api/client";
+import { useRouter, goLineage } from "./hooks/useRouter";
+import { useRecents } from "./hooks/useRecents";
 
 const TABLE_LOAD_MAX_RETRIES = 3;
-const TABLE_LOAD_RETRY_DELAY = 2000; // ms between retries
+const TABLE_LOAD_RETRY_DELAY = 2000;
 
 export default function App() {
+  const route = useRouter();
+  const { addRecent } = useRecents();
   const focusTable = useLineageStore((s) => s.focusTable);
   const catalog = useLineageStore((s) => s.catalog);
   const schema = useLineageStore((s) => s.schema);
@@ -18,50 +26,15 @@ export default function App() {
   const isAdmin = useLineageStore((s) => s.isAdmin);
   const retryCount = useRef(0);
   const lineageAbortRef = useRef<AbortController | null>(null);
-  const [adminPage, setAdminPage] = useState(false);
 
-  // Fetch user info (admin status) on mount, then process deep link if present
+  // Fetch user info (admin status) on mount
   useEffect(() => {
     api.getUserInfo()
       .then((info) => useLineageStore.getState().setIsAdmin(info.isAdmin))
-      .catch(() => useLineageStore.getState().setIsAdmin(false))
-      .finally(() => {
-        const params = new URLSearchParams(window.location.search);
-
-        // Admin page: ?admin=true opens standalone admin dashboard
-        if (params.get("admin") === "true") {
-          setAdminPage(true);
-          return;
-        }
-
-        // Deep link: ?table=catalog.schema.table jumps straight to lineage
-        const table = params.get("table");
-        if (table && table.split(".").length === 3) {
-          const parts = table.split(".");
-          useLineageStore.getState().setFocusTable(table);
-          window.history.replaceState({}, "", window.location.pathname);
-          setLiveMode(false);
-          useLineageStore.setState({ loading: true, error: null });
-          api.getLineage(parts[0], parts[1])
-            .then((data) => {
-              useLineageStore.getState().setLineageData({
-                nodes: data.nodes,
-                edges: data.edges,
-                cached: data.cached,
-                cachedAt: data.cached_at,
-                cacheExpiresAt: data.cache_expires_at,
-                fetchDurationMs: data.fetch_duration_ms,
-              });
-            })
-            .catch((err: any) => {
-              useLineageStore.getState().setError(err.message || "Failed to load lineage data");
-            });
-        }
-      });
+      .catch(() => useLineageStore.getState().setIsAdmin(false));
   }, []);
 
-  // Load all tables on mount with retry — only retry on transient failures.
-  // Auth/permission errors (4xx) are NOT retried; they signal a real config issue.
+  // Load all tables on mount with retry (transient failures only — 4xx aren't retried)
   const loadTables = useCallback(() => {
     useLineageStore.getState().setAllTablesLoading(true);
     api.getTables()
@@ -70,7 +43,6 @@ export default function App() {
           retryCount.current = 0;
           useLineageStore.getState().setAllTables(r.tables);
         } else if (retryCount.current < TABLE_LOAD_MAX_RETRIES) {
-          // Empty result — backend might still be preloading. Retry.
           retryCount.current++;
           setTimeout(loadTables, TABLE_LOAD_RETRY_DELAY);
         } else {
@@ -94,8 +66,7 @@ export default function App() {
     loadTables();
   }, [loadTables]);
 
-  // Auto-fetch lineage when focusTable is selected. Cancels any in-flight
-  // request so quick table switches don't race.
+  // Fetch lineage for a catalog/schema. Cancels any in-flight request so quick switches don't race.
   const fetchLineage = useCallback(async (cat: string, sch: string) => {
     setLiveMode(useLineageStore.getState().liveMode);
     lineageAbortRef.current?.abort();
@@ -119,7 +90,22 @@ export default function App() {
     }
   }, []);
 
-  // Re-fetch lineage immediately when live mode is toggled (if a table is already selected)
+  // Sync focusTable from route. Handles deep links, back/forward, and any URL-driven nav.
+  const lineageTable = route.view === "lineage" ? route.table : null;
+  useEffect(() => {
+    if (lineageTable) {
+      if (focusTable !== lineageTable) {
+        useLineageStore.getState().setFocusTable(lineageTable);
+        addRecent(lineageTable);
+        const parts = lineageTable.split(".");
+        fetchLineage(parts[0], parts[1]);
+      }
+    } else if (focusTable) {
+      useLineageStore.getState().setFocusTable(null);
+    }
+  }, [lineageTable, focusTable, addRecent, fetchLineage]);
+
+  // Re-fetch lineage when live mode is toggled (if a table is selected)
   const prevLiveMode = useRef(liveMode);
   useEffect(() => {
     if (prevLiveMode.current !== liveMode && focusTable && catalog && schema) {
@@ -128,19 +114,19 @@ export default function App() {
     prevLiveMode.current = liveMode;
   }, [liveMode, focusTable, catalog, schema, fetchLineage]);
 
+  // Navigation handler called by Landing / search / drill-down / etc.
   const handleSelectTable = useCallback((fqdn: string) => {
-    useLineageStore.getState().setFocusTable(fqdn);
-    const parts = fqdn.split(".");
-    fetchLineage(parts[0], parts[1]);
-  }, [fetchLineage]);
+    goLineage(fqdn);
+  }, []);
 
   const handleGenerate = useCallback(async () => {
     if (!catalog || !schema) return;
     fetchLineage(catalog, schema);
   }, [catalog, schema, fetchLineage]);
 
-  // Standalone admin dashboard page
-  if (adminPage) {
+  // === Render by route ===
+
+  if (route.view === "admin") {
     if (!isAdmin) {
       return (
         <div className="h-screen w-screen flex items-center justify-center bg-surface">
@@ -154,19 +140,54 @@ export default function App() {
     return <AdminDashboard open={true} onClose={() => window.close()} />;
   }
 
-  // Landing page when no table is selected
-  if (!focusTable) {
-    return <LandingPage onSelectTable={handleSelectTable} />;
+  if (route.view === "lineage") {
+    return (
+      <>
+        <ReactFlowProvider>
+          <div className="h-screen w-screen flex flex-col overflow-hidden bg-surface">
+            <Toolbar onGenerate={handleGenerate} />
+            <div className="flex-1 relative">
+              <LineageCanvas />
+            </div>
+          </div>
+        </ReactFlowProvider>
+        <GlobalSearch onSelectTable={handleSelectTable} />
+      </>
+    );
   }
 
+  if (route.view === "catalogs") {
+    return (
+      <>
+        <CatalogListView />
+        <GlobalSearch onSelectTable={handleSelectTable} />
+      </>
+    );
+  }
+
+  if (route.view === "schemas") {
+    return (
+      <>
+        <SchemaListView catalog={route.catalog} />
+        <GlobalSearch onSelectTable={handleSelectTable} />
+      </>
+    );
+  }
+
+  if (route.view === "tables") {
+    return (
+      <>
+        <TableListView catalog={route.catalog} schema={route.schema} onSelectTable={handleSelectTable} />
+        <GlobalSearch onSelectTable={handleSelectTable} />
+      </>
+    );
+  }
+
+  // Default: landing
   return (
-    <ReactFlowProvider>
-      <div className="h-screen w-screen flex flex-col overflow-hidden bg-surface">
-        <Toolbar onGenerate={handleGenerate} />
-        <div className="flex-1 relative">
-          <LineageCanvas />
-        </div>
-      </div>
-    </ReactFlowProvider>
+    <>
+      <Landing onSelectTable={handleSelectTable} />
+      <GlobalSearch onSelectTable={handleSelectTable} />
+    </>
   );
 }
