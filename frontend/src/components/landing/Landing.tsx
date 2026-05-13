@@ -5,6 +5,7 @@ import { useLineageStore } from "../../store/lineageStore";
 import { api } from "../../api/client";
 import { useRecents } from "../../hooks/useRecents";
 import { goCatalogs } from "../../hooks/useRouter";
+import HeaderMenu from "../layout/HeaderMenu";
 import type { TableSearchItem } from "../../api/client";
 
 const typeIcons: Record<string, typeof Database> = {
@@ -99,6 +100,11 @@ function Landing({ onSelectTable }: Props) {
   return (
     <div className="h-screen w-screen flex flex-col items-center bg-surface overflow-hidden relative">
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.06)_0%,transparent_60%)]" />
+
+      {/* Floating menu in top-right */}
+      <div className="absolute top-5 right-5 z-20">
+        <HeaderMenu variant="floating" />
+      </div>
 
       <div className="relative z-10 flex flex-col items-center gap-10 w-full max-w-2xl px-8 mt-[14vh]">
         {/* Header */}

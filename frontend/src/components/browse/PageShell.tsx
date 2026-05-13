@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { GitBranch, Search } from "lucide-react";
 import { useLineageStore } from "../../store/lineageStore";
 import { goLanding } from "../../hooks/useRouter";
+import HeaderMenu from "../layout/HeaderMenu";
 
 interface Props {
   children: ReactNode;
@@ -34,14 +35,17 @@ function PageShell({ children }: Props) {
           </div>
         </button>
 
-        <button
-          onClick={() => setGlobalSearchOpen(true)}
-          className="ml-auto flex items-center gap-2 px-3 py-2 bg-surface-50/80 hover:bg-surface-50 border border-white/[0.06] hover:border-accent/30 rounded-lg text-[12px] text-slate-400 hover:text-slate-200 transition-all duration-200 w-72"
-        >
-          <Search size={13} />
-          <span className="font-mono">Search any table...</span>
-          <kbd className="ml-auto text-[10px] text-slate-600 bg-surface-200 px-1.5 py-0.5 rounded font-mono">⌘K</kbd>
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={() => setGlobalSearchOpen(true)}
+            className="flex items-center gap-2 px-3 py-2 bg-surface-50/80 hover:bg-surface-50 border border-white/[0.06] hover:border-accent/30 rounded-lg text-[12px] text-slate-400 hover:text-slate-200 transition-all duration-200 w-72"
+          >
+            <Search size={13} />
+            <span className="font-mono">Search any table...</span>
+            <kbd className="ml-auto text-[10px] text-slate-600 bg-surface-200 px-1.5 py-0.5 rounded font-mono">⌘K</kbd>
+          </button>
+          <HeaderMenu />
+        </div>
       </motion.div>
 
       {/* Content area */}

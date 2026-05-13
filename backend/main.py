@@ -103,6 +103,12 @@ def _get_user_info(request: Request) -> tuple[str | None, bool]:
     """
     user_token = request.headers.get("x-forwarded-access-token")
     if not user_token:
+        # Local-dev override: when LOCAL_DEV_ADMIN_EMAIL is set, return that as an admin user.
+        # The Apps proxy never sets x-forwarded-access-token in local uvicorn runs, so without
+        # this override is_admin would always be false locally. Production deploys never set this.
+        local_dev_email = os.environ.get("LOCAL_DEV_ADMIN_EMAIL")
+        if local_dev_email:
+            return local_dev_email, True
         logger.warning("No x-forwarded-access-token header — cannot identify user")
         return None, False
 
