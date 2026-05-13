@@ -1,8 +1,10 @@
 import { memo, useCallback, useEffect, useState, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { GitBranch, Search, ChevronDown, Columns3, Zap, Info, Lock, AlertTriangle, ArrowLeft, Activity, Menu, Percent } from "lucide-react";
+import { GitBranch, Search, ChevronDown, Columns3, Zap, Info, Lock, AlertTriangle, ArrowLeft, Percent } from "lucide-react";
 import { useLineageStore } from "../../store/lineageStore";
 import { api, setLiveMode } from "../../api/client";
+import { goLanding } from "../../hooks/useRouter";
+import HeaderMenu from "./HeaderMenu";
 
 interface Props {
   onGenerate: () => void;
@@ -18,7 +20,6 @@ function Toolbar({ onGenerate }: Props) {
 
   const nodes = useLineageStore((s) => s.nodes);
   const [toast, setToast] = useState<string | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
   const orphanCount = useMemo(() => nodes.filter((n) => n.node_type === "table" && n.lineage_status === "orphan").length, [nodes]);
 
   const handleLiveModeToggle = useCallback(() => {
@@ -74,12 +75,17 @@ function Toolbar({ onGenerate }: Props) {
         border-b border-white/[0.04]
       "
     >
-      {/* Logo */}
-      <div className="flex items-center gap-2.5 mr-1">
+      {/* Logo — clickable, returns to home */}
+      <button
+        onClick={goLanding}
+        className="flex items-center gap-2.5 mr-1 hover:opacity-90 transition-opacity"
+        title="Back to home"
+        aria-label="Back to home"
+      >
         <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-accent to-purple-500 flex items-center justify-center shadow-[0_0_12px_rgba(99,102,241,0.3)]">
           <GitBranch size={16} className="text-white" />
         </div>
-        <div>
+        <div className="text-left">
           <div className="font-semibold text-[14px] text-white tracking-tight leading-none">
             Lineage Explorer
           </div>
@@ -87,7 +93,7 @@ function Toolbar({ onGenerate }: Props) {
             Unity Catalog
           </div>
         </div>
-      </div>
+      </button>
 
       {/* Divider */}
       <div className="w-px h-8 bg-white/[0.06]" />
@@ -285,57 +291,8 @@ function Toolbar({ onGenerate }: Props) {
         <Search size={14} className="text-slate-500" />
       </button>
 
-      {/* Burger menu */}
-      <div className="relative">
-        <button
-          onClick={() => setMenuOpen((v) => !v)}
-          className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.06] hover:border-white/[0.12] transition-all duration-200"
-          title="Menu"
-        >
-          <Menu size={15} className="text-slate-400" />
-        </button>
-        <AnimatePresence>
-          {menuOpen && (
-            <>
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="fixed inset-0 z-[90]"
-                onClick={() => setMenuOpen(false)}
-              />
-              <motion.div
-                initial={{ opacity: 0, y: -4, scale: 0.96 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -4, scale: 0.96 }}
-                transition={{ duration: 0.15 }}
-                className="absolute right-0 top-full mt-2 z-[100] w-52 rounded-xl bg-[#161625]/95 backdrop-blur-xl border border-white/[0.08] shadow-[0_12px_40px_rgba(0,0,0,0.5)] overflow-hidden"
-              >
-                {isAdmin && (
-                  <a
-                    href="/?admin=true"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={() => setMenuOpen(false)}
-                    className="flex items-center gap-2.5 px-4 py-3 hover:bg-white/[0.04] transition-colors border-b border-white/[0.04]"
-                  >
-                    <Activity size={14} className="text-emerald-400" />
-                    <span className="text-[12px] text-slate-300 font-medium">Admin Dashboard</span>
-                  </a>
-                )}
-                <a
-                  href="/"
-                  onClick={() => setMenuOpen(false)}
-                  className="flex items-center gap-2.5 px-4 py-3 hover:bg-white/[0.04] transition-colors"
-                >
-                  <GitBranch size={14} className="text-accent-light" />
-                  <span className="text-[12px] text-slate-300 font-medium">Table Explorer</span>
-                </a>
-              </motion.div>
-            </>
-          )}
-        </AnimatePresence>
-      </div>
+      {/* Shared menu */}
+      <HeaderMenu />
     </motion.header>
     {/* Cache status banner */}
     {nodes.length > 0 && (

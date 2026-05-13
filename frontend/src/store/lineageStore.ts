@@ -39,6 +39,7 @@ interface LineageState {
   hoveredNode: string | null;
   searchQuery: string;
   searchOpen: boolean;
+  globalSearchOpen: boolean;
 
   // Actions
   setFocusTable: (fqdn: string | null) => void;
@@ -71,6 +72,7 @@ interface LineageState {
   setHoveredNode: (nodeId: string | null) => void;
   setSearchQuery: (query: string) => void;
   setSearchOpen: (open: boolean) => void;
+  setGlobalSearchOpen: (open: boolean) => void;
   reset: () => void;
 }
 
@@ -103,6 +105,7 @@ export const useLineageStore = create<LineageState>((set) => ({
   hoveredNode: null,
   searchQuery: "",
   searchOpen: false,
+  globalSearchOpen: false,
 
   setFocusTable: (fqdn) => {
     if (!fqdn) {
@@ -157,6 +160,7 @@ export const useLineageStore = create<LineageState>((set) => ({
   setHoveredNode: (nodeId) => set({ hoveredNode: nodeId }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setSearchOpen: (searchOpen) => set({ searchOpen }),
+  setGlobalSearchOpen: (globalSearchOpen) => set({ globalSearchOpen }),
   reset: () =>
     set({
       nodes: [],
