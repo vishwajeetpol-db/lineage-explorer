@@ -75,8 +75,8 @@ targets:
     resources:
       apps:
         lineage-explorer:
-          name: lineage-explorer-dev
-          description: "Unity Catalog Lineage Explorer — Interactive DAG visualization (dev)"
+          name: lineage-explorer-direct
+          description: "Unity Catalog Lineage Explorer — Interactive DAG visualization"
           source_code_path: .
           resources:
             - name: sql-warehouse
