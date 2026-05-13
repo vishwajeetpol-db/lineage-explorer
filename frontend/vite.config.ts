@@ -24,6 +24,10 @@ export default defineConfig({
   build: {
     outDir: "dist",
     sourcemap: false,
+    // Disable modulepreload links. The eager preload hints for reactflow/elk/motion
+    // weren't being used on the landing page and the browser was warning about
+    // wasted bytes. Chunks still load on-demand when entering the lineage view.
+    modulePreload: false,
     rollupOptions: {
       output: {
         // Code-split the heavy deps so the initial shell stays small. First
