@@ -128,6 +128,11 @@ export const api = {
       `${BASE}/schema-column-lineage?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}`
     ),
 
+  // Server-side .xlsx export URL. Omit schema for catalog-wide scope.
+  lineageExportUrl: (catalog: string, schema?: string) =>
+    `${BASE}/lineage/export?catalog=${encodeURIComponent(catalog)}` +
+    (schema ? `&schema=${encodeURIComponent(schema)}` : ""),
+
   getEntityName: (entityType: string, entityId: string) =>
     fetchJson<{ name: string; owner?: string }>(
       `${BASE}/entity-name?entity_type=${encodeURIComponent(entityType)}&entity_id=${encodeURIComponent(entityId)}`

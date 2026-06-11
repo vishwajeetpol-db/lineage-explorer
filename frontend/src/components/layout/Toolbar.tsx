@@ -4,7 +4,6 @@ import { GitBranch, Search, ChevronDown, Columns3, Zap, Info, Lock, AlertTriangl
 import { useLineageStore } from "../../store/lineageStore";
 import { api, setLiveMode } from "../../api/client";
 import { goLanding, goSchemas, goCatalogs } from "../../hooks/useRouter";
-import { exportLineageToExcel } from "../../lib/exportLineage";
 import HeaderMenu from "./HeaderMenu";
 
 interface Props {
@@ -16,7 +15,7 @@ function Toolbar({ onGenerate }: Props) {
     catalog, schema, focusTable, scope, lineageView, lineageDepth, columnLineageEnabled, liveMode, isAdmin,
     catalogs, schemas, loading, cached, cachedAt, cacheExpiresAt, fetchDurationMs,
     setCatalog, setSchema, setFocusTable, setLineageView, setLineageDepth, setColumnLineageEnabled, setLiveMode: setStoreLiveMode,
-    setCatalogs, setSchemas, setSearchOpen, discountPercent, setDiscountPercent,
+    setCatalogs, setSchemas, setSearchOpen, discountPercent, setDiscountPercent, setPreviewOpen,
   } = useLineageStore();
 
   const nodes = useLineageStore((s) => s.nodes);
@@ -69,28 +68,14 @@ function Toolbar({ onGenerate }: Props) {
     if (catalog && schema) onGenerate();
   }, [catalog, schema, onGenerate]);
 
-  // Export the currently rendered graph to a multi-sheet .xlsx (client-side).
+  // Open the export preview (in-app table + Download to .xlsx).
   const handleExport = useCallback(() => {
-    const s = useLineageStore.getState();
-    if (!s.nodes.length) {
+    if (!useLineageStore.getState().nodes.length) {
       setToast("Nothing to export yet — generate a lineage graph first.");
       return;
     }
-    try {
-      exportLineageToExcel({
-        nodes: s.nodes,
-        edges: s.edges,
-        columnEdges: s.columnEdges,
-        scope: s.scope,
-        catalog: s.catalog,
-        schema: s.schema,
-        focusTable: s.focusTable,
-      });
-    } catch (e) {
-      console.error("Export failed:", e);
-      setToast("Export failed — see console for details.");
-    }
-  }, []);
+    setPreviewOpen(true);
+  }, [setPreviewOpen]);
 
   return (
     <>

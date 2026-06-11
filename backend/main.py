@@ -32,7 +32,7 @@ def _record_latency(latency_ms: float):
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from databricks.sdk import WorkspaceClient
 from backend.lineage_service import (
@@ -610,6 +610,49 @@ async def api_get_schema_column_lineage(
     except Exception as e:
         logger.error(f"Error getting schema column lineage: {e}")
         raise HTTPException(status_code=500, detail=_safe_error(e))
+
+
+@app.get("/api/lineage/export")
+async def api_export_lineage(
+    request: Request,
+    catalog: str = Query(...),
+    schema: str | None = Query(None),
+):
+    """Stream a styled .xlsx of the lineage graph. Omit schema for catalog-wide.
+    Column lineage is included for schema scope (it's per-schema)."""
+    catalog = _validate_identifier(catalog, "catalog")
+    if schema is not None:
+        schema = _validate_identifier(schema, "schema")
+    try:
+        result = await asyncio.to_thread(get_table_lineage, catalog, schema, False)
+        column_edges = None
+        if schema is not None:
+            try:
+                column_edges = await asyncio.to_thread(get_schema_column_lineage, catalog, schema, False)
+            except Exception as ce:
+                logger.warning(f"Column lineage unavailable for export {catalog}.{schema}: {ce}")
+        from backend.excel_export import build_lineage_workbook
+        data = await asyncio.to_thread(build_lineage_workbook, catalog, schema, result, column_edges)
+    except ImportError:
+        logger.error("openpyxl not installed — cannot build Excel export")
+        raise HTTPException(status_code=503, detail="Excel export is temporarily unavailable on the server.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        if "exceeding the" in str(e) and "catalog-wide lineage" in str(e):
+            raise HTTPException(status_code=413, detail=str(e))
+        logger.error(f"Error building lineage export: {e}")
+        raise HTTPException(status_code=500, detail=_safe_error(e))
+
+    label = f"{catalog}.{schema}" if schema else catalog
+    safe_label = re.sub(r"[^A-Za-z0-9._-]", "_", label)[:60]
+    stamp = time.strftime("%Y-%m-%d")
+    filename = f"lineage_{safe_label}_{stamp}.xlsx"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/entity-name")

@@ -45,6 +45,7 @@ interface LineageState {
   searchQuery: string;
   searchOpen: boolean;
   globalSearchOpen: boolean;
+  previewOpen: boolean;
 
   // Actions
   setFocusTable: (fqdn: string | null) => void;
@@ -81,6 +82,7 @@ interface LineageState {
   setSearchQuery: (query: string) => void;
   setSearchOpen: (open: boolean) => void;
   setGlobalSearchOpen: (open: boolean) => void;
+  setPreviewOpen: (open: boolean) => void;
   reset: () => void;
 }
 
@@ -115,6 +117,7 @@ export const useLineageStore = create<LineageState>((set) => ({
   searchQuery: "",
   searchOpen: false,
   globalSearchOpen: false,
+  previewOpen: false,
 
   setFocusTable: (fqdn) => {
     if (!fqdn) {
@@ -187,6 +190,7 @@ export const useLineageStore = create<LineageState>((set) => ({
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setSearchOpen: (searchOpen) => set({ searchOpen }),
   setGlobalSearchOpen: (globalSearchOpen) => set({ globalSearchOpen }),
+  setPreviewOpen: (previewOpen) => set({ previewOpen }),
   reset: () =>
     set({
       nodes: [],

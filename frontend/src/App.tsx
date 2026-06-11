@@ -5,6 +5,7 @@ import LineageCanvas from "./components/graph/LineageCanvas";
 import AdminDashboard from "./components/AdminDashboard";
 import Landing from "./components/landing/Landing";
 import GlobalSearch from "./components/landing/GlobalSearch";
+import LineagePreview from "./components/lineage/LineagePreview";
 import CatalogListView from "./components/browse/CatalogListView";
 import SchemaListView from "./components/browse/SchemaListView";
 import TableListView from "./components/browse/TableListView";
@@ -171,6 +172,7 @@ export default function App() {
           </div>
         </ReactFlowProvider>
         <GlobalSearch onSelectTable={handleSelectTable} />
+        <LineagePreview />
       </>
     );
   }
