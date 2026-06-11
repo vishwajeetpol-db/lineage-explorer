@@ -655,13 +655,21 @@ static_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "fro
 if os.path.exists(static_dir):
     app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
 
+    _index_path = os.path.join(static_dir, "index.html")
+
+    def _index_response() -> FileResponse:
+        # index.html must never be cached: it points at fingerprinted JS/CSS,
+        # so a stale copy would keep loading the previous deploy's bundle.
+        # (The hashed /assets files are safe to cache — their names change.)
+        return FileResponse(_index_path, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
         # Resolve the absolute path and ensure it stays within static_dir.
         # Use os.sep boundary so a sibling like `/static_dirextra` can't pass.
         file_path = os.path.realpath(os.path.join(static_dir, full_path))
         if not (file_path == static_dir or file_path.startswith(static_dir + os.sep)):
-            return FileResponse(os.path.join(static_dir, "index.html"))
+            return _index_response()
         if os.path.isfile(file_path):
             return FileResponse(file_path)
-        return FileResponse(os.path.join(static_dir, "index.html"))
+        return _index_response()
