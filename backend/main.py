@@ -631,8 +631,19 @@ async def api_export_lineage(
                 column_edges = await asyncio.to_thread(get_schema_column_lineage, catalog, schema, False)
             except Exception as ce:
                 logger.warning(f"Column lineage unavailable for export {catalog}.{schema}: {ce}")
+        # Resolve job/pipeline display names for the Lineage Map boxes.
+        entity_names: dict[str, str] = {}
+        for n in result.nodes:
+            if getattr(n, "node_type", None) == "entity":
+                nm = n.display_name
+                if not nm:
+                    try:
+                        nm = (await asyncio.to_thread(resolve_entity_name, n.entity_type, n.entity_id)).get("name")
+                    except Exception:
+                        nm = None
+                entity_names[n.id] = nm or f"{n.entity_type} {n.entity_id[:8]}"
         from backend.excel_export import build_lineage_workbook
-        data = await asyncio.to_thread(build_lineage_workbook, catalog, schema, result, column_edges)
+        data = await asyncio.to_thread(build_lineage_workbook, catalog, schema, result, column_edges, entity_names)
     except ImportError:
         logger.error("openpyxl not installed — cannot build Excel export")
         raise HTTPException(status_code=503, detail="Excel export is temporarily unavailable on the server.")

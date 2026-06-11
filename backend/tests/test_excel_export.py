@@ -49,6 +49,30 @@ def test_layering_cycle_safe():
     assert set(placed) == {"a", "b"}
 
 
+def test_layering_fanout_job_does_not_collapse_downstream():
+    """Regression: a job that both reads and writes overlapping tables (the
+    'Pipeline Demo' case) used to create cycles that dumped deep nodes into
+    layer 0. Deep nodes must now get real layers via cycle-robust layering.
+
+    Graph: raw -> jobA -> mid -> jobB -> deep, where jobA also reads `mid`
+    (read+write overlap → a cycle through jobA).
+    """
+    names = ["raw", "mid", "deep", "entity:JOB:A", "entity:JOB:B"]
+    ids = {n: types.SimpleNamespace(name=n) for n in names}
+    edges = [
+        ("raw", "entity:JOB:A"),
+        ("entity:JOB:A", "mid"),
+        ("mid", "entity:JOB:A"),       # overlap → back-edge / cycle
+        ("mid", "entity:JOB:B"),
+        ("entity:JOB:B", "deep"),
+    ]
+    layers, orphans, _ = _layer_nodes(ids, edges)
+    layer_of = {n: L for L, ns in layers.items() for n in ns}
+    assert layer_of["raw"] == 0
+    assert layer_of["deep"] > layer_of["mid"] > layer_of["raw"]  # deep is NOT at layer 0
+    assert not orphans
+
+
 def test_build_workbook_has_all_sheets_including_map():
     pytest.importorskip("openpyxl")
     from openpyxl import load_workbook
