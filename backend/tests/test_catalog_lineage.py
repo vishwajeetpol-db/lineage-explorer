@@ -82,6 +82,17 @@ def test_schema_scope_keeps_cross_schema_target_external(lineage_sql):
     assert any(e.target == "main.silver.customers" for e in result.edges)
 
 
+def test_cross_schema_external_node_not_orphan(lineage_sql):
+    """Regression: a cross-schema/cross-catalog stub node that participates in
+    an edge must get real upstream/downstream counts and NOT be flagged orphan
+    (it used to show 0/0 because only in-scope tables were counted)."""
+    result = lineage_service.get_table_lineage("main", "bronze")
+    ext = next(n for n in result.nodes if n.id == "main.silver.customers")
+    assert ext.upstream_count >= 1            # raw_orders → silver.customers
+    assert ext.lineage_status != "orphan"
+    assert ext.lineage_status == "leaf"       # has upstream, no downstream in-graph
+
+
 def test_catalog_cap_enforced(lineage_sql, monkeypatch):
     monkeypatch.setattr(lineage_service, "LINEAGE_MAX_NODES", 2)
     with pytest.raises(RuntimeError, match="exceeding the"):

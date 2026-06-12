@@ -984,14 +984,19 @@ def _fetch_table_lineage(catalog: str, schema: str | None, cache_key: str) -> Li
 
     edges = [LineageEdge(source=s, target=t) for s, t in edge_set]
 
-    # Calculate upstream/downstream counts for table nodes only
+    # Calculate upstream/downstream counts for ALL table nodes — including the
+    # cross-schema / cross-catalog stub nodes, not just the in-scope schema.
+    # Counting only schema_tables wrongly marked an external source/target
+    # (e.g. cross_src_inventory.products feeding this schema) as an orphan with
+    # 0/0, even though it clearly has an edge in the graph. Entity (job/pipeline)
+    # intermediaries are excluded so counts reflect table connectivity.
+    table_node_ids = {nid for nid, n in nodes_map.items() if isinstance(n, TableNode)}
     downstream_count: dict[str, int] = {}
     upstream_count: dict[str, int] = {}
     for s, t in edge_set:
-        # Count table-to-table connectivity (skip entity intermediaries)
-        if s in schema_tables:
+        if s in table_node_ids:
             downstream_count[s] = downstream_count.get(s, 0) + 1
-        if t in schema_tables:
+        if t in table_node_ids:
             upstream_count[t] = upstream_count.get(t, 0) + 1
 
     for node_id, node in nodes_map.items():
