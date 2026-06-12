@@ -66,6 +66,7 @@ export interface LineageResponse {
   cached_at?: string | null;
   cache_expires_at?: string | null;
   fetch_duration_ms?: number | null;
+  lineage_window_days?: number | null;
 }
 
 export interface ColumnLineageResponse {
@@ -111,6 +112,13 @@ export const api = {
       signal,
     ),
 
+  // Catalog-wide lineage — omit schema to span every schema in the catalog.
+  getCatalogLineage: (catalog: string, signal?: AbortSignal) =>
+    fetchJson<LineageResponse>(
+      `${BASE}/lineage?catalog=${encodeURIComponent(catalog)}`,
+      signal,
+    ),
+
   getColumnLineage: (catalog: string, schema: string, table: string, column: string) =>
     fetchJson<ColumnLineageResponse>(
       `${BASE}/column-lineage?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}&column=${encodeURIComponent(column)}`
@@ -120,6 +128,11 @@ export const api = {
     fetchJson<ColumnLineageResponse>(
       `${BASE}/schema-column-lineage?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}`
     ),
+
+  // Server-side .xlsx export URL. Omit schema for catalog-wide scope.
+  lineageExportUrl: (catalog: string, schema?: string) =>
+    `${BASE}/lineage/export?catalog=${encodeURIComponent(catalog)}` +
+    (schema ? `&schema=${encodeURIComponent(schema)}` : ""),
 
   getEntityName: (entityType: string, entityId: string) =>
     fetchJson<{ name: string; owner?: string }>(

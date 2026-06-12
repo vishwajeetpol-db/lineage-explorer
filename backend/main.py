@@ -32,7 +32,7 @@ def _record_latency(latency_ms: float):
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from databricks.sdk import WorkspaceClient
 from backend.lineage_service import (
@@ -43,6 +43,7 @@ from backend.lineage_service import (
     get_column_lineage,
     get_schema_column_lineage,
     get_columns,
+    get_table_edges,
     resolve_entity_name,
     invalidate_cache,
     evict_cache_entry,
@@ -212,19 +213,20 @@ async def lifespan(app: FastAPI):
     loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=64))
     logger.info("Lineage Explorer starting up — thread pool set to 64 workers, clearing stale caches")
     invalidate_cache()
-    # Pre-fetch serverless list price in background so it's ready for first lineage load
-    from backend.lineage_service import _get_serverless_price, _get_client
+    # Pre-fetch per-entity cost cache in background so first lineage load shows cost.
+    # The aggregation can take a few minutes against busy system.billing — it must
+    # never run on the lineage hot path, only here and via the stale-cache tickler.
+    from backend.lineage_service import _refresh_cost_cache, _get_client
     prefetch_task: asyncio.Task | None = None
-    async def _prefetch_price():
+    async def _prefetch_cost():
         try:
             client = _get_client()
-            await asyncio.to_thread(_get_serverless_price, client)
-            logger.info("Serverless list price pre-fetched at startup")
+            await asyncio.to_thread(_refresh_cost_cache, client)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning(f"Failed to pre-fetch serverless price (will retry on first lineage load): {e}")
-    prefetch_task = asyncio.create_task(_prefetch_price())
+            logger.warning(f"Failed to pre-fetch cost cache (will retry on first lineage load): {e}")
+    prefetch_task = asyncio.create_task(_prefetch_cost())
     try:
         yield
     finally:
@@ -519,9 +521,11 @@ async def api_list_schemas(catalog: str = Query(...)):
 
 
 @app.get("/api/lineage")
-async def api_get_lineage(request: Request, catalog: str = Query(...), schema: str = Query(...), live: bool = Query(False)):
+async def api_get_lineage(request: Request, catalog: str = Query(...), schema: str | None = Query(None), live: bool = Query(False)):
     catalog = _validate_identifier(catalog, "catalog")
-    schema = _validate_identifier(schema, "schema")
+    # schema is optional: omitting it builds catalog-wide lineage across all schemas
+    if schema is not None:
+        schema = _validate_identifier(schema, "schema")
     # Only admins can bypass cache with live mode
     if live:
         _, is_admin = await asyncio.to_thread(_get_user_info, request)
@@ -529,9 +533,13 @@ async def api_get_lineage(request: Request, catalog: str = Query(...), schema: s
             live = False
     try:
         if live:
-            logger.info(f"LIVE MODE: Serving lineage for {catalog}.{schema} direct from system tables")
+            scope = f"{catalog}.{schema}" if schema else f"{catalog} (catalog-wide)"
+            logger.info(f"LIVE MODE: Serving lineage for {scope} direct from system tables")
         return await asyncio.to_thread(get_table_lineage, catalog, schema, live)
     except Exception as e:
+        # Catalog-wide size cap is a client-actionable condition, not a server fault.
+        if "exceeding the" in str(e) and "catalog-wide lineage" in str(e):
+            raise HTTPException(status_code=413, detail=str(e))
         logger.error(f"Error getting lineage: {e}")
         raise HTTPException(status_code=500, detail=_safe_error(e))
 
@@ -605,6 +613,79 @@ async def api_get_schema_column_lineage(
         raise HTTPException(status_code=500, detail=_safe_error(e))
 
 
+@app.get("/api/lineage/export")
+async def api_export_lineage(
+    request: Request,
+    catalog: str = Query(...),
+    schema: str | None = Query(None),
+):
+    """Stream a styled .xlsx of the lineage graph. Omit schema for catalog-wide.
+    Column lineage is included for schema scope (it's per-schema)."""
+    catalog = _validate_identifier(catalog, "catalog")
+    if schema is not None:
+        schema = _validate_identifier(schema, "schema")
+    try:
+        result = await asyncio.to_thread(get_table_lineage, catalog, schema, False)
+        # Real recorded table→table pairs (with mediating entity) — accurate edges
+        # for the Lineage sheet, instead of a cross-product reconstruction.
+        table_edges = await asyncio.to_thread(get_table_edges, catalog, schema, False)
+        column_edges = None
+        if schema is not None:
+            try:
+                column_edges = await asyncio.to_thread(get_schema_column_lineage, catalog, schema, False)
+            except Exception as ce:
+                logger.warning(f"Column lineage unavailable for export {catalog}.{schema}: {ce}")
+
+        # Resolve job/pipeline display names (for Lineage Map boxes + the "Via"
+        # column). Cover entities from the graph AND from the real edge pairs.
+        entity_names: dict[str, str] = {}
+        entity_keys: set[tuple[str, str]] = set()
+        for n in result.nodes:
+            if getattr(n, "node_type", None) == "entity":
+                if n.display_name:
+                    entity_names[n.id] = n.display_name
+                else:
+                    entity_keys.add((n.entity_type, n.entity_id))
+        for e in table_edges:
+            if e.get("entity_type") and e.get("entity_id"):
+                entity_keys.add((e["entity_type"], e["entity_id"]))
+        for etype, eid in entity_keys:
+            key = f"entity:{etype}:{eid}"
+            if key in entity_names:
+                continue
+            nm = None
+            try:
+                nm = (await asyncio.to_thread(resolve_entity_name, etype, eid)).get("name")
+            except Exception:
+                nm = None
+            entity_names[key] = nm or f"{etype} {eid[:8]}"
+
+        from backend.excel_export import build_lineage_workbook
+        data = await asyncio.to_thread(
+            build_lineage_workbook, catalog, schema, result, column_edges, entity_names, table_edges
+        )
+    except ImportError:
+        logger.error("openpyxl not installed — cannot build Excel export")
+        raise HTTPException(status_code=503, detail="Excel export is temporarily unavailable on the server.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        if "exceeding the" in str(e) and "catalog-wide lineage" in str(e):
+            raise HTTPException(status_code=413, detail=str(e))
+        logger.error(f"Error building lineage export: {e}")
+        raise HTTPException(status_code=500, detail=_safe_error(e))
+
+    label = f"{catalog}.{schema}" if schema else catalog
+    safe_label = re.sub(r"[^A-Za-z0-9._-]", "_", label)[:60]
+    stamp = time.strftime("%Y-%m-%d")
+    filename = f"lineage_{safe_label}_{stamp}.xlsx"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/api/entity-name")
 async def api_entity_name(entity_type: str = Query(...), entity_id: str = Query(...)):
     """Resolve an entity (job/pipeline/notebook) ID to a display name + metadata."""
@@ -648,13 +729,21 @@ static_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "fro
 if os.path.exists(static_dir):
     app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
 
+    _index_path = os.path.join(static_dir, "index.html")
+
+    def _index_response() -> FileResponse:
+        # index.html must never be cached: it points at fingerprinted JS/CSS,
+        # so a stale copy would keep loading the previous deploy's bundle.
+        # (The hashed /assets files are safe to cache — their names change.)
+        return FileResponse(_index_path, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
         # Resolve the absolute path and ensure it stays within static_dir.
         # Use os.sep boundary so a sibling like `/static_dirextra` can't pass.
         file_path = os.path.realpath(os.path.join(static_dir, full_path))
         if not (file_path == static_dir or file_path.startswith(static_dir + os.sep)):
-            return FileResponse(os.path.join(static_dir, "index.html"))
+            return _index_response()
         if os.path.isfile(file_path):
             return FileResponse(file_path)
-        return FileResponse(os.path.join(static_dir, "index.html"))
+        return _index_response()

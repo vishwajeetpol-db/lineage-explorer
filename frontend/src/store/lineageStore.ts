@@ -1,9 +1,14 @@
 import { create } from "zustand";
 import type { GraphNode, LineageEdge, ColumnLineageEdge, TableSearchItem } from "../api/client";
 
+export type LineageScope = "table" | "schema" | "catalog";
+
 interface LineageState {
   // Table-focused landing
   focusTable: string | null; // FQDN of selected table
+  // Scope of the currently rendered graph. "table" = focused on focusTable's
+  // lineage path; "schema" = whole schema; "catalog" = whole catalog.
+  scope: LineageScope;
   allTables: TableSearchItem[];
   allTablesLoading: boolean;
 
@@ -29,6 +34,7 @@ interface LineageState {
   cachedAt: string | null;
   cacheExpiresAt: string | null;
   fetchDurationMs: number | null;
+  lineageWindowDays: number;
 
   // UI state
   loading: boolean;
@@ -40,9 +46,13 @@ interface LineageState {
   searchQuery: string;
   searchOpen: boolean;
   globalSearchOpen: boolean;
+  previewOpen: boolean;
 
   // Actions
   setFocusTable: (fqdn: string | null) => void;
+  // Enter a non-table scope (whole schema or whole catalog). Clears focusTable
+  // and the current graph so the canvas renders the full unfiltered graph.
+  enterScopeLineage: (scope: "schema" | "catalog", catalog: string, schema: string) => void;
   setAllTables: (tables: TableSearchItem[]) => void;
   setAllTablesLoading: (loading: boolean) => void;
   setCatalog: (catalog: string) => void;
@@ -62,6 +72,7 @@ interface LineageState {
     cachedAt?: string | null;
     cacheExpiresAt?: string | null;
     fetchDurationMs?: number | null;
+    lineageWindowDays?: number | null;
   }) => void;
   setColumnEdges: (edges: ColumnLineageEdge[]) => void;
   setLoading: (loading: boolean) => void;
@@ -73,11 +84,13 @@ interface LineageState {
   setSearchQuery: (query: string) => void;
   setSearchOpen: (open: boolean) => void;
   setGlobalSearchOpen: (open: boolean) => void;
+  setPreviewOpen: (open: boolean) => void;
   reset: () => void;
 }
 
 export const useLineageStore = create<LineageState>((set) => ({
   focusTable: null,
+  scope: "table",
   allTables: [],
   allTablesLoading: false,
   catalog: "",
@@ -97,6 +110,7 @@ export const useLineageStore = create<LineageState>((set) => ({
   cachedAt: null,
   cacheExpiresAt: null,
   fetchDurationMs: null,
+  lineageWindowDays: 90,
   loading: false,
   error: null,
   expandedNodes: new Set(),
@@ -106,15 +120,33 @@ export const useLineageStore = create<LineageState>((set) => ({
   searchQuery: "",
   searchOpen: false,
   globalSearchOpen: false,
+  previewOpen: false,
 
   setFocusTable: (fqdn) => {
     if (!fqdn) {
-      set({ focusTable: null, catalog: "", schema: "", nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null, cached: false, cachedAt: null, cacheExpiresAt: null, fetchDurationMs: null });
+      set({ focusTable: null, scope: "table", catalog: "", schema: "", nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null, cached: false, cachedAt: null, cacheExpiresAt: null, fetchDurationMs: null });
     } else {
       const parts = fqdn.split(".");
-      set({ focusTable: fqdn, catalog: parts[0], schema: parts[1] });
+      set({ focusTable: fqdn, scope: "table", catalog: parts[0], schema: parts[1] });
     }
   },
+  enterScopeLineage: (scope, catalog, schema) =>
+    set({
+      scope,
+      focusTable: null,
+      catalog,
+      schema,
+      nodes: [],
+      edges: [],
+      columnEdges: [],
+      expandedNodes: new Set(),
+      selectedNode: null,
+      selectedColumn: null,
+      cached: false,
+      cachedAt: null,
+      cacheExpiresAt: null,
+      fetchDurationMs: null,
+    }),
   setAllTables: (tables) => set({ allTables: tables, allTablesLoading: false }),
   setAllTablesLoading: (loading) => set({ allTablesLoading: loading }),
   setCatalog: (catalog) => set({ catalog, schema: "", schemas: [], nodes: [], edges: [], columnEdges: [], expandedNodes: new Set(), selectedNode: null, selectedColumn: null, cached: false, cachedAt: null, cacheExpiresAt: null, fetchDurationMs: null }),
@@ -127,7 +159,7 @@ export const useLineageStore = create<LineageState>((set) => ({
   setDiscountPercent: (percent) => set({ discountPercent: Math.max(0, Math.min(99, percent)) }),
   setCatalogs: (catalogs) => set({ catalogs }),
   setSchemas: (schemas) => set({ schemas }),
-  setLineageData: ({ nodes, edges, cached, cachedAt, cacheExpiresAt, fetchDurationMs }) =>
+  setLineageData: ({ nodes, edges, cached, cachedAt, cacheExpiresAt, fetchDurationMs, lineageWindowDays }) =>
     set({
       nodes,
       edges,
@@ -137,6 +169,7 @@ export const useLineageStore = create<LineageState>((set) => ({
       cachedAt: cachedAt ?? null,
       cacheExpiresAt: cacheExpiresAt ?? null,
       fetchDurationMs: fetchDurationMs ?? null,
+      lineageWindowDays: lineageWindowDays ?? 90,
     }),
   setColumnEdges: (columnEdges) => set({ columnEdges }),
   setLoading: (loading) => set({ loading }),
@@ -161,6 +194,7 @@ export const useLineageStore = create<LineageState>((set) => ({
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setSearchOpen: (searchOpen) => set({ searchOpen }),
   setGlobalSearchOpen: (globalSearchOpen) => set({ globalSearchOpen }),
+  setPreviewOpen: (previewOpen) => set({ previewOpen }),
   reset: () =>
     set({
       nodes: [],

@@ -48,6 +48,7 @@ class LineageResponse(BaseModel):
     cached_at: Optional[str] = None
     cache_expires_at: Optional[str] = None
     fetch_duration_ms: Optional[int] = None
+    lineage_window_days: Optional[int] = None  # lookback window used for this graph
 
 
 class ColumnLineageResponse(BaseModel):
