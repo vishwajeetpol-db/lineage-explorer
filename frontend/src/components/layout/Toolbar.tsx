@@ -13,7 +13,7 @@ interface Props {
 function Toolbar({ onGenerate }: Props) {
   const {
     catalog, schema, focusTable, scope, lineageView, lineageDepth, columnLineageEnabled, liveMode, isAdmin,
-    catalogs, schemas, loading, cached, cachedAt, cacheExpiresAt, fetchDurationMs,
+    catalogs, schemas, loading, cached, cachedAt, cacheExpiresAt, fetchDurationMs, lineageWindowDays,
     setCatalog, setSchema, setFocusTable, setLineageView, setLineageDepth, setColumnLineageEnabled, setLiveMode: setStoreLiveMode,
     setCatalogs, setSchemas, setSearchOpen, discountPercent, setDiscountPercent, setPreviewOpen,
   } = useLineageStore();
@@ -393,7 +393,7 @@ function Toolbar({ onGenerate }: Props) {
     {orphanCount > 0 && !focusTable && (
       <div className="flex items-center justify-center gap-2 px-4 py-1 text-[10px] font-medium tracking-wide bg-amber-500/5 text-amber-400/80 border-b border-amber-500/10">
         <AlertTriangle size={10} className="flex-shrink-0" />
-        {orphanCount} {orphanCount === 1 ? "table has" : "tables have"} no lineage recorded — no tracked query has read from or written to {orphanCount === 1 ? "it" : "them"}.
+        {orphanCount} {orphanCount === 1 ? "table has" : "tables have"} no lineage in the last {lineageWindowDays} days — no tracked query has read from or written to {orphanCount === 1 ? "it" : "them"} in that window.
         {" "}
         <a
           href="https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-lineage"

@@ -71,6 +71,10 @@ SQL_WAIT_TIMEOUT = os.environ.get("SQL_WAIT_TIMEOUT", "50s")  # max 50s per Data
 # When the in-scope table count exceeds this, we refuse rather than melt the
 # warehouse/browser. Schema-scoped requests are never capped.
 LINEAGE_MAX_NODES = int(os.environ.get("LINEAGE_MAX_NODES", "2500"))
+# Lookback window for system.access lineage queries. UC retains lineage events
+# but the app only surfaces those within this window; older-only tables show as
+# orphan. Configurable so aged demos/datasets can still be visualized.
+LINEAGE_WINDOW_DAYS = int(os.environ.get("LINEAGE_WINDOW_DAYS", "90"))
 
 _CACHE_MAX_BYTES = CACHE_MAX_MEMORY_MB * 1024 * 1024
 
@@ -488,7 +492,7 @@ def _wrap_with_cache_metadata(
     can't observe a half-updated response, and there's no shared-reference drift
     between what's in the cache and what goes out on the wire.
     """
-    updates: dict = {}
+    updates: dict = {"lineage_window_days": LINEAGE_WINDOW_DAYS}
     cache_ts = _cache_get_ts(cache_key)
     if cache_ts is not None:
         updates["cached"] = from_cache
@@ -679,7 +683,7 @@ def _fetch_table_lineage(catalog: str, schema: str | None, cache_key: str) -> Li
     WHERE (
         {lineage_scope_filter}
     )
-    AND event_time > current_date() - INTERVAL 90 DAYS
+    AND event_time > current_date() - INTERVAL {LINEAGE_WINDOW_DAYS} DAYS
     """
     try:
         lineage_rows = _execute_sql(client, lineage_sql)
@@ -808,7 +812,7 @@ def _fetch_table_lineage(catalog: str, schema: str | None, cache_key: str) -> Li
             created_by
         FROM system.access.table_lineage
         WHERE entity_id IN ({eid_list})
-        AND event_time > current_date() - INTERVAL 90 DAYS
+        AND event_time > current_date() - INTERVAL {LINEAGE_WINDOW_DAYS} DAYS
         """
         try:
             followup_rows = _execute_sql(client, followup_sql)
@@ -1129,7 +1133,7 @@ def get_schema_column_lineage(catalog: str, schema: str, skip_cache: bool = Fals
             AND source_table_full_name != target_table_full_name
             AND source_column_name IS NOT NULL
             AND target_column_name IS NOT NULL
-            AND event_time > current_date() - INTERVAL 90 DAYS
+            AND event_time > current_date() - INTERVAL {LINEAGE_WINDOW_DAYS} DAYS
             LIMIT 50000
             """
             rows = _execute_sql(client, sql)
@@ -1193,7 +1197,7 @@ def get_table_edges(catalog: str, schema: str | None = None, skip_cache: bool = 
           AND source_table_full_name IS NOT NULL
           AND target_table_full_name IS NOT NULL
           AND source_table_full_name != target_table_full_name
-          AND event_time > current_date() - INTERVAL 90 DAYS
+          AND event_time > current_date() - INTERVAL {LINEAGE_WINDOW_DAYS} DAYS
         LIMIT 100000
         """
         try:

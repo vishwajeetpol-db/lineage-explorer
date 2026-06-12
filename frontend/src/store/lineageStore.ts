@@ -34,6 +34,7 @@ interface LineageState {
   cachedAt: string | null;
   cacheExpiresAt: string | null;
   fetchDurationMs: number | null;
+  lineageWindowDays: number;
 
   // UI state
   loading: boolean;
@@ -71,6 +72,7 @@ interface LineageState {
     cachedAt?: string | null;
     cacheExpiresAt?: string | null;
     fetchDurationMs?: number | null;
+    lineageWindowDays?: number | null;
   }) => void;
   setColumnEdges: (edges: ColumnLineageEdge[]) => void;
   setLoading: (loading: boolean) => void;
@@ -108,6 +110,7 @@ export const useLineageStore = create<LineageState>((set) => ({
   cachedAt: null,
   cacheExpiresAt: null,
   fetchDurationMs: null,
+  lineageWindowDays: 90,
   loading: false,
   error: null,
   expandedNodes: new Set(),
@@ -156,7 +159,7 @@ export const useLineageStore = create<LineageState>((set) => ({
   setDiscountPercent: (percent) => set({ discountPercent: Math.max(0, Math.min(99, percent)) }),
   setCatalogs: (catalogs) => set({ catalogs }),
   setSchemas: (schemas) => set({ schemas }),
-  setLineageData: ({ nodes, edges, cached, cachedAt, cacheExpiresAt, fetchDurationMs }) =>
+  setLineageData: ({ nodes, edges, cached, cachedAt, cacheExpiresAt, fetchDurationMs, lineageWindowDays }) =>
     set({
       nodes,
       edges,
@@ -166,6 +169,7 @@ export const useLineageStore = create<LineageState>((set) => ({
       cachedAt: cachedAt ?? null,
       cacheExpiresAt: cacheExpiresAt ?? null,
       fetchDurationMs: fetchDurationMs ?? null,
+      lineageWindowDays: lineageWindowDays ?? 90,
     }),
   setColumnEdges: (columnEdges) => set({ columnEdges }),
   setLoading: (loading) => set({ loading }),

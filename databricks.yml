@@ -19,6 +19,9 @@ variables:
   rate_limit_window_seconds:
     description: "Rate-limit window in seconds"
     default: "60"
+  lineage_window_days:
+    description: "Lookback window (days) for system.access lineage queries"
+    default: "365"
 
 # Files excluded from `databricks bundle deploy` uploads.
 # `.databricksignore` is best-effort across CLI versions — `sync.exclude` is authoritative.
@@ -104,6 +107,8 @@ targets:
                 value: ${var.rate_limit_max_requests}
               - name: RATE_LIMIT_WINDOW_SECONDS
                 value: ${var.rate_limit_window_seconds}
+              - name: LINEAGE_WINDOW_DAYS
+                value: ${var.lineage_window_days}
 
   prod:
     mode: production
@@ -141,3 +146,5 @@ targets:
                 value: ${var.rate_limit_max_requests}
               - name: RATE_LIMIT_WINDOW_SECONDS
                 value: ${var.rate_limit_window_seconds}
+              - name: LINEAGE_WINDOW_DAYS
+                value: ${var.lineage_window_days}

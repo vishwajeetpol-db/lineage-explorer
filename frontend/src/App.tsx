@@ -88,6 +88,7 @@ export default function App() {
         cachedAt: data.cached_at,
         cacheExpiresAt: data.cache_expires_at,
         fetchDurationMs: data.fetch_duration_ms,
+        lineageWindowDays: data.lineage_window_days,
       });
     } catch (err: any) {
       if (err?.name === "AbortError") return;
