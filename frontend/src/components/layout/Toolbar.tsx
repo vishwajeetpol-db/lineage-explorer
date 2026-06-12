@@ -53,7 +53,7 @@ function Toolbar({ onGenerate }: Props) {
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
   }, [optionsOpen]);
-  const optionsActive = (lineageDepth || 0) > 0 || (discountPercent || 0) > 0;
+  const optionsActive = (!!focusTable && (lineageDepth || 0) > 0) || (discountPercent || 0) > 0;
 
   const handleLiveModeToggle = useCallback(() => {
     if (!isAdmin) {
@@ -234,8 +234,10 @@ function Toolbar({ onGenerate }: Props) {
         )}
       </div>
 
-      {/* Options popover — Depth + Discount (focused-table only) */}
-      {focusTable && (
+      {/* Options popover — Depth + Discount. Always present when a graph is
+          loaded so it never "disappears"; Depth is enabled only in focused-table
+          view (it measures hops from a specific table). */}
+      {nodes.length > 0 && (
         <div ref={optionsRef} className="relative flex-shrink-0">
           <button
             onClick={() => setOptionsOpen((o) => !o)}
@@ -253,22 +255,25 @@ function Toolbar({ onGenerate }: Props) {
           </button>
           {optionsOpen && (
             <div className="absolute top-full mt-1.5 left-0 z-50 w-60 rounded-xl bg-[#14141F] border border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.55)] p-3 space-y-3">
-              <div className="flex items-center justify-between">
+              <div className={`flex items-center justify-between ${focusTable ? "" : "opacity-50"}`}>
                 <div>
                   <div className="text-[12px] text-slate-200 font-medium">Depth</div>
-                  <div className="text-[10px] text-slate-500">Hops up + downstream (blank = all)</div>
+                  <div className="text-[10px] text-slate-500">
+                    {focusTable ? "Hops up + downstream (blank = all)" : "Open a single table to use depth"}
+                  </div>
                 </div>
                 <input
                   type="text"
                   inputMode="numeric"
                   maxLength={2}
-                  value={lineageDepth || ""}
+                  disabled={!focusTable}
+                  value={focusTable ? (lineageDepth || "") : ""}
                   onChange={(e) => {
                     const raw = e.target.value.replace(/\D/g, "").slice(0, 2);
                     setLineageDepth(raw ? parseInt(raw, 10) : 0);
                   }}
                   placeholder="All"
-                  className="w-14 bg-white/[0.04] border border-white/[0.06] rounded-md px-2 py-1 text-[12px] font-mono text-slate-200 placeholder:text-slate-600 outline-none focus:border-accent/40 text-center"
+                  className="w-14 bg-white/[0.04] border border-white/[0.06] rounded-md px-2 py-1 text-[12px] font-mono text-slate-200 placeholder:text-slate-600 outline-none focus:border-accent/40 text-center disabled:cursor-not-allowed"
                 />
               </div>
               <div className="h-px bg-white/[0.06]" />
