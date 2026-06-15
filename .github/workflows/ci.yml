@@ -22,8 +22,23 @@ jobs:
           DATABRICKS_WAREHOUSE_ID: test-warehouse-id
         run: pytest
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff
+      # Scope to high-signal rules (pyflakes F + syntax E9): real bugs — undefined
+      # names, unused imports, broken syntax — without forcing a style overhaul.
+      - name: Lint backend
+        run: ruff check --select F,E9 backend monitoring
+
   frontend-build:
     runs-on: ubuntu-latest
+    # `npm run build` runs `tsc && vite build`, so this also gates TypeScript types.
     defaults:
       run:
         working-directory: frontend

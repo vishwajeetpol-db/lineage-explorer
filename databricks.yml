@@ -22,6 +22,9 @@ variables:
   lineage_window_days:
     description: "Lookback window (days) for system.access lineage queries"
     default: "365"
+  cost_cache_ttl_seconds:
+    description: "TTL (seconds) for the per-entity serverless-cost cache; billing rolls up daily"
+    default: "21600"
 
 # Files excluded from `databricks bundle deploy` uploads.
 # `.databricksignore` is best-effort across CLI versions — `sync.exclude` is authoritative.
@@ -109,6 +112,8 @@ targets:
                 value: ${var.rate_limit_window_seconds}
               - name: LINEAGE_WINDOW_DAYS
                 value: ${var.lineage_window_days}
+              - name: COST_CACHE_TTL_SECONDS
+                value: ${var.cost_cache_ttl_seconds}
 
   prod:
     mode: production
@@ -148,3 +153,5 @@ targets:
                 value: ${var.rate_limit_window_seconds}
               - name: LINEAGE_WINDOW_DAYS
                 value: ${var.lineage_window_days}
+              - name: COST_CACHE_TTL_SECONDS
+                value: ${var.cost_cache_ttl_seconds}
