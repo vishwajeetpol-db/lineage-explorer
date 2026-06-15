@@ -89,6 +89,35 @@ export default function App() {
         cacheExpiresAt: data.cache_expires_at,
         fetchDurationMs: data.fetch_duration_ms,
         lineageWindowDays: data.lineage_window_days,
+        truncated: data.truncated,
+      });
+    } catch (err: any) {
+      if (err?.name === "AbortError") return;
+      useLineageStore.getState().setError(err.message || "Failed to load lineage data");
+    }
+  }, []);
+
+  // Selecting any object (table) auto-loads its COMPLETE end-to-end lineage —
+  // every source back to every target, across catalogs/schemas/Delta Sharing —
+  // via the cross-catalog trace. No manual action; the only knob is view mode.
+  const fetchTrace = useCallback(async (table: string) => {
+    setLiveMode(useLineageStore.getState().liveMode);
+    lineageAbortRef.current?.abort();
+    const controller = new AbortController();
+    lineageAbortRef.current = controller;
+    useLineageStore.setState({ loading: true, error: null });
+    try {
+      const data = await api.getLineageTrace(table, controller.signal);
+      if (controller.signal.aborted) return;
+      useLineageStore.getState().setLineageData({
+        nodes: data.nodes,
+        edges: data.edges,
+        cached: data.cached,
+        cachedAt: data.cached_at,
+        cacheExpiresAt: data.cache_expires_at,
+        fetchDurationMs: data.fetch_duration_ms,
+        lineageWindowDays: data.lineage_window_days,
+        truncated: data.truncated,
       });
     } catch (err: any) {
       if (err?.name === "AbortError") return;
@@ -104,8 +133,7 @@ export default function App() {
       if (store.focusTable !== route.table) {
         store.setFocusTable(route.table);
         addRecent(route.table);
-        const parts = route.table.split(".");
-        fetchLineage(parts[0], parts[1]);
+        fetchTrace(route.table);
       }
     } else if (route.view === "schemaLineage") {
       const matches = store.scope === "schema" && !store.focusTable
@@ -124,16 +152,17 @@ export default function App() {
     } else if (store.focusTable) {
       store.setFocusTable(null);
     }
-  }, [route, focusTable, addRecent, fetchLineage]);
+  }, [route, focusTable, addRecent, fetchLineage, fetchTrace]);
 
   // Re-fetch lineage when live mode is toggled (if a graph is currently loaded)
   const prevLiveMode = useRef(liveMode);
   useEffect(() => {
     if (prevLiveMode.current !== liveMode && catalog && (schema || focusTable || scope === "catalog")) {
-      fetchLineage(catalog, schema);
+      if (focusTable) fetchTrace(focusTable);
+      else fetchLineage(catalog, schema);
     }
     prevLiveMode.current = liveMode;
-  }, [liveMode, focusTable, catalog, schema, scope, fetchLineage]);
+  }, [liveMode, focusTable, catalog, schema, scope, fetchLineage, fetchTrace]);
 
   // Navigation handler called by Landing / search / drill-down / etc.
   const handleSelectTable = useCallback((fqdn: string) => {

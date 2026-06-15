@@ -67,6 +67,7 @@ export interface LineageResponse {
   cache_expires_at?: string | null;
   fetch_duration_ms?: number | null;
   lineage_window_days?: number | null;
+  truncated?: boolean;
 }
 
 export interface ColumnLineageResponse {
@@ -96,6 +97,41 @@ export interface UserInfo {
   isAdmin: boolean;
 }
 
+// --- Delta Sharing overlay ---
+export type SharingAudience = "provider" | "recipient" | "both";
+
+export interface SharedOutEntry {
+  full_name: string;
+  share_name: string;
+  recipients: string[];
+  shared_as: string | null;
+  cdf_enabled: boolean;
+}
+
+export interface ForeignCatalogEntry {
+  catalog_name: string;
+  provider_name: string;
+  share_names: string[];
+  cloud: string | null;
+  region: string | null;
+}
+
+export interface SharingOverlay {
+  audience: SharingAudience;
+  shared_out: SharedOutEntry[];
+  foreign_catalogs: ForeignCatalogEntry[];
+  available: boolean;
+}
+
+export interface SharingOverview {
+  shares: { share_name: string; owner: string | null; comment: string | null; num_tables: number; recipients: string[] }[];
+  recipients: { recipient_name: string; authentication_type: string | null; owner: string | null; comment: string | null }[];
+  providers: { provider_name: string; cloud: string | null; region: string | null; comment: string | null }[];
+  foreign_catalogs: { catalog_name: string; provider_name: string | null; share_names: string[] }[];
+  shared_tables: { full_name: string; share_name: string }[];
+  totals: { shares: number; recipients: number; providers: number; foreign_catalogs: number; shared_tables: number };
+}
+
 export const api = {
   getUserInfo: () => fetchJson<UserInfo>(`${BASE}/user-info`),
 
@@ -119,6 +155,10 @@ export const api = {
       signal,
     ),
 
+  // End-to-end cross-catalog trace from a single seed table (catalog.schema.table).
+  getLineageTrace: (table: string, signal?: AbortSignal) =>
+    fetchJson<LineageResponse>(`${BASE}/lineage/trace?table=${encodeURIComponent(table)}`, signal),
+
   getColumnLineage: (catalog: string, schema: string, table: string, column: string) =>
     fetchJson<ColumnLineageResponse>(
       `${BASE}/column-lineage?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}&column=${encodeURIComponent(column)}`
@@ -133,6 +173,16 @@ export const api = {
   lineageExportUrl: (catalog: string, schema?: string) =>
     `${BASE}/lineage/export?catalog=${encodeURIComponent(catalog)}` +
     (schema ? `&schema=${encodeURIComponent(schema)}` : ""),
+
+  // Delta Sharing overlay for a lineage scope (omit schema for catalog-wide).
+  getSharingOverlay: (catalog: string, schema: string | undefined, audience: SharingAudience) =>
+    fetchJson<SharingOverlay>(
+      `${BASE}/sharing/overlay?catalog=${encodeURIComponent(catalog)}` +
+      (schema ? `&schema=${encodeURIComponent(schema)}` : "") +
+      `&audience=${encodeURIComponent(audience)}`
+    ),
+
+  getSharingOverview: () => fetchJson<SharingOverview>(`${BASE}/sharing/overview`),
 
   getEntityName: (entityType: string, entityId: string) =>
     fetchJson<{ name: string; owner?: string }>(

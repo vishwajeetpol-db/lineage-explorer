@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { GraphNode, LineageEdge, ColumnLineageEdge, TableSearchItem } from "../api/client";
+import type { GraphNode, LineageEdge, ColumnLineageEdge, TableSearchItem, SharingOverlay, SharingAudience } from "../api/client";
 
 export type LineageScope = "table" | "schema" | "catalog";
 
@@ -22,6 +22,11 @@ interface LineageState {
   isAdmin: boolean;
   discountPercent: number;
 
+  // Delta Sharing overlay — a lens layered on the current graph (off by default).
+  sharingEnabled: boolean;
+  sharingAudience: SharingAudience;
+  sharingOverlay: SharingOverlay | null;
+
   // Data
   catalogs: string[];
   schemas: string[];
@@ -35,6 +40,7 @@ interface LineageState {
   cacheExpiresAt: string | null;
   fetchDurationMs: number | null;
   lineageWindowDays: number;
+  truncated: boolean;
 
   // UI state
   loading: boolean;
@@ -63,6 +69,9 @@ interface LineageState {
   setLiveMode: (live: boolean) => void;
   setIsAdmin: (isAdmin: boolean) => void;
   setDiscountPercent: (percent: number) => void;
+  setSharingEnabled: (enabled: boolean) => void;
+  setSharingAudience: (audience: SharingAudience) => void;
+  setSharingOverlay: (overlay: SharingOverlay | null) => void;
   setCatalogs: (catalogs: string[]) => void;
   setSchemas: (schemas: string[]) => void;
   setLineageData: (data: {
@@ -73,6 +82,7 @@ interface LineageState {
     cacheExpiresAt?: string | null;
     fetchDurationMs?: number | null;
     lineageWindowDays?: number | null;
+    truncated?: boolean;
   }) => void;
   setColumnEdges: (edges: ColumnLineageEdge[]) => void;
   setLoading: (loading: boolean) => void;
@@ -101,6 +111,12 @@ export const useLineageStore = create<LineageState>((set) => ({
   liveMode: false,
   isAdmin: false,
   discountPercent: 0,
+  // Delta Sharing is always part of the lineage picture — no toggle. The overlay
+  // (shared-in/out badges + provider/share/recipient boundary nodes) is fetched
+  // and applied automatically whenever a graph loads.
+  sharingEnabled: true,
+  sharingAudience: "both",
+  sharingOverlay: null,
   catalogs: [],
   schemas: [],
   nodes: [],
@@ -111,6 +127,7 @@ export const useLineageStore = create<LineageState>((set) => ({
   cacheExpiresAt: null,
   fetchDurationMs: null,
   lineageWindowDays: 90,
+  truncated: false,
   loading: false,
   error: null,
   expandedNodes: new Set(),
@@ -157,9 +174,13 @@ export const useLineageStore = create<LineageState>((set) => ({
   setLiveMode: (live) => set({ liveMode: live }),
   setIsAdmin: (isAdmin) => set({ isAdmin }),
   setDiscountPercent: (percent) => set({ discountPercent: Math.max(0, Math.min(99, percent)) }),
+  // Disabling the overlay also drops its data so the graph reflows back immediately.
+  setSharingEnabled: (sharingEnabled) => set(sharingEnabled ? { sharingEnabled } : { sharingEnabled, sharingOverlay: null }),
+  setSharingAudience: (sharingAudience) => set({ sharingAudience, sharingOverlay: null }),
+  setSharingOverlay: (sharingOverlay) => set({ sharingOverlay }),
   setCatalogs: (catalogs) => set({ catalogs }),
   setSchemas: (schemas) => set({ schemas }),
-  setLineageData: ({ nodes, edges, cached, cachedAt, cacheExpiresAt, fetchDurationMs, lineageWindowDays }) =>
+  setLineageData: ({ nodes, edges, cached, cachedAt, cacheExpiresAt, fetchDurationMs, lineageWindowDays, truncated }) =>
     set({
       nodes,
       edges,
@@ -170,6 +191,7 @@ export const useLineageStore = create<LineageState>((set) => ({
       cacheExpiresAt: cacheExpiresAt ?? null,
       fetchDurationMs: fetchDurationMs ?? null,
       lineageWindowDays: lineageWindowDays ?? 90,
+      truncated: truncated ?? false,
     }),
   setColumnEdges: (columnEdges) => set({ columnEdges }),
   setLoading: (loading) => set({ loading }),
