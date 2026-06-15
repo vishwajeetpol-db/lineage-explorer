@@ -22,7 +22,9 @@ import { api } from "../../api/client";
 import { layoutGraph } from "../../lib/elkLayout";
 
 import TableNodeComponent from "./TableNode";
+import type { SharingBadge } from "./TableNode";
 import EntityNodeComponent from "./EntityNode";
+import SharingNodeComponent from "./SharingNode";
 import AnimatedEdge from "./AnimatedEdge";
 import TableTooltip from "../ui/TableTooltip";
 import SearchDialog from "../ui/SearchDialog";
@@ -31,6 +33,7 @@ import Skeleton from "../ui/Skeleton";
 const nodeTypes: NodeTypes = {
   tableNode: TableNodeComponent,
   entityNode: EntityNodeComponent,
+  sharingNode: SharingNodeComponent,
 };
 
 const edgeTypes: EdgeTypes = {
@@ -205,6 +208,75 @@ function LineageCanvas() {
     return { viewNodes: rawNodes, viewEdges: rawEdges };
   }, [rawNodes, rawEdges, lineageView]);
 
+  // =========================================================================
+  // DELTA SHARING OVERLAY — augment the view graph with sharing boundary nodes.
+  // Outbound: table → [share] → recipient (teal, dashed). Inbound: tag tables
+  // whose catalog is a Delta Share foreign catalog and add a [provider] node.
+  // This is a lens, not lineage — augmentation happens AFTER the view-mode memo
+  // so it flows uniformly through layout/reveal/highlight, but never touches the
+  // canonical lineage data or the focus-table BFS above.
+  // =========================================================================
+  const sharingEnabled = useLineageStore((s) => s.sharingEnabled);
+  const sharingAudience = useLineageStore((s) => s.sharingAudience);
+  const sharingOverlay = useLineageStore((s) => s.sharingOverlay);
+
+  const { augNodes, augEdges, badgeByTable } = useMemo(() => {
+    const badgeByTable = new Map<string, SharingBadge>();
+    if (!sharingEnabled || !sharingOverlay) {
+      return { augNodes: viewNodes as Node["data"][], augEdges: viewEdges, badgeByTable };
+    }
+
+    const tableIds = new Set(viewNodes.filter((n) => n.node_type === "table").map((n) => n.id));
+    const extraNodes: any[] = [];
+    const extraEdges: { source: string; target: string; sharing: true }[] = [];
+    const seen = new Set<string>();
+    const addNode = (id: string, kind: "share" | "recipient" | "provider", label: string, sub?: string | null) => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      extraNodes.push({ id, node_type: "sharing", sharingKind: kind, label, sub: sub ?? null });
+    };
+
+    // Outbound — my tables published into shares
+    for (const so of sharingOverlay.shared_out) {
+      if (!tableIds.has(so.full_name)) continue;
+      const b = badgeByTable.get(so.full_name) ?? {};
+      b.out = b.out ?? { shares: [], recipients: [] };
+      if (!b.out.shares.includes(so.share_name)) b.out.shares.push(so.share_name);
+      for (const r of so.recipients) if (!b.out.recipients.includes(r)) b.out.recipients.push(r);
+      badgeByTable.set(so.full_name, b);
+
+      const shareId = `sharing:share:${so.share_name}`;
+      addNode(shareId, "share", so.share_name, so.shared_as ? `as ${so.shared_as}` : null);
+      extraEdges.push({ source: so.full_name, target: shareId, sharing: true });
+      for (const r of so.recipients) {
+        const recId = `sharing:recipient:${r}`;
+        addNode(recId, "recipient", r);
+        extraEdges.push({ source: shareId, target: recId, sharing: true });
+      }
+    }
+
+    // Inbound — tables whose catalog is a Delta Share foreign catalog
+    const foreignByCat = new Map(sharingOverlay.foreign_catalogs.map((f) => [f.catalog_name, f]));
+    for (const n of viewNodes) {
+      if (n.node_type !== "table") continue;
+      const cat = n.id.split(".")[0];
+      const f = foreignByCat.get(cat);
+      if (!f) continue;
+      const b = badgeByTable.get(n.id) ?? {};
+      b.in = { provider: f.provider_name, shares: f.share_names };
+      badgeByTable.set(n.id, b);
+      const provId = `sharing:provider:${f.provider_name}`;
+      addNode(provId, "provider", f.provider_name, f.region ? `${f.cloud ?? ""} ${f.region}`.trim() : null);
+      extraEdges.push({ source: provId, target: n.id, sharing: true });
+    }
+
+    return {
+      augNodes: [...viewNodes, ...extraNodes] as any[],
+      augEdges: [...viewEdges, ...extraEdges],
+      badgeByTable,
+    };
+  }, [viewNodes, viewEdges, sharingEnabled, sharingOverlay]);
+
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
   const [flowEdges, setFlowEdges] = useState<Edge[]>([]);
   const [tooltipData, setTooltipData] = useState<{
@@ -216,6 +288,8 @@ function LineageCanvas() {
   const reactFlowInstance = useReactFlow();
   const updateNodeInternals = useUpdateNodeInternals();
   const tooltipTimer = useRef<ReturnType<typeof setTimeout>>();
+  const tooltipHideTimer = useRef<ReturnType<typeof setTimeout>>();
+  const [showLargeHint, setShowLargeHint] = useState(false);
   const flowNodesRef = useRef<Node[]>(flowNodes);
   flowNodesRef.current = flowNodes;
 
@@ -231,14 +305,14 @@ function LineageCanvas() {
   const adjacency = useMemo(() => {
     const upstream = new Map<string, string[]>();  // target -> sources
     const downstream = new Map<string, string[]>(); // source -> targets
-    for (const e of viewEdges) {
+    for (const e of augEdges) {
       if (!upstream.has(e.target)) upstream.set(e.target, []);
       upstream.get(e.target)!.push(e.source);
       if (!downstream.has(e.source)) downstream.set(e.source, []);
       downstream.get(e.source)!.push(e.target);
     }
     return { upstream, downstream };
-  }, [viewEdges]);
+  }, [augEdges]);
 
   // Compute connected nodes for highlighting using adjacency maps
   // Entity nodes: one-hop only (source tables + target tables)
@@ -288,39 +362,67 @@ function LineageCanvas() {
   const connectedEdges = useMemo(() => {
     if (!selectedNode && !hoveredNode) return new Set<string>();
     const edgeSet = new Set<string>();
-    viewEdges.forEach((e) => {
+    augEdges.forEach((e) => {
       if (connectedNodes.has(e.source) && connectedNodes.has(e.target)) {
         edgeSet.add(`${e.source}->${e.target}`);
       }
     });
     return edgeSet;
-  }, [connectedNodes, viewEdges, selectedNode, hoveredNode]);
+  }, [connectedNodes, augEdges, selectedNode, hoveredNode]);
 
   // Schema-level column lineage from system.access.column_lineage.
   // Fetched once per schema (cached server-side), then transitive traversal
   // runs client-side on real UC column edges — not name-matching heuristics.
   const [schemaColEdges, setSchemaColEdges] = useState<{ source_table: string; source_column: string; target_table: string; target_column: string }[]>([]);
 
-  // Fetch all column edges for the schema when column mode is enabled.
-  // Works for a focused table and for whole-schema scope (derives catalog/schema
-  // from the store). Catalog-wide scope has no single schema, so it's skipped.
+  // Fetch column edges when column mode is on. A trace spans MANY schemas across
+  // catalogs, so we fetch column lineage for EVERY distinct catalog.schema present
+  // in the graph and merge — otherwise column tracing would stop at the focused
+  // table's own schema. Catalog-wide scope is skipped (Columns is disabled there).
   const storeCatalog = useLineageStore((s) => s.catalog);
   const storeSchema = useLineageStore((s) => s.schema);
   const scope = useLineageStore((s) => s.scope);
   useEffect(() => {
-    const cat = focusTable ? focusTable.split(".")[0] : storeCatalog;
-    const sch = focusTable ? focusTable.split(".")[1] : storeSchema;
-    if (!columnLineageEnabled || scope === "catalog" || !cat || !sch) {
+    if (!columnLineageEnabled || scope === "catalog") {
       setSchemaColEdges([]);
       return;
     }
+    // Distinct catalog.schema pairs from the table nodes currently in the graph.
+    const pairs = new Set<string>();
+    for (const n of allNodes) {
+      if (n.node_type === "table") {
+        const p = n.id.split(".");
+        if (p.length === 3) pairs.add(`${p[0]}.${p[1]}`);
+      }
+    }
+    if (pairs.size === 0) { setSchemaColEdges([]); return; }
 
     let cancelled = false;
-    api.getSchemaColumnLineage(cat, sch)
-      .then((resp) => { if (!cancelled) setSchemaColEdges(resp.edges); })
-      .catch(() => { if (!cancelled) setSchemaColEdges([]); });
+    Promise.all(
+      [...pairs].slice(0, 16).map((cs) => {
+        const dot = cs.indexOf(".");
+        const c = cs.slice(0, dot), s = cs.slice(dot + 1);
+        return api.getSchemaColumnLineage(c, s).then((r) => r.edges).catch(() => []);
+      })
+    ).then((lists) => { if (!cancelled) setSchemaColEdges(lists.flat()); });
     return () => { cancelled = true; };
-  }, [columnLineageEnabled, focusTable, storeCatalog, storeSchema, scope]);
+  }, [columnLineageEnabled, allNodes, scope]);
+
+  // Fetch the Delta Sharing overlay when the toggle is on. Catalog scope has no
+  // single schema, so the overlay is queried catalog-wide (schema undefined).
+  const setSharingOverlay = useLineageStore((s) => s.setSharingOverlay);
+  useEffect(() => {
+    if (!sharingEnabled) { setSharingOverlay(null); return; }
+    const cat = focusTable ? focusTable.split(".")[0] : storeCatalog;
+    const sch = scope === "catalog" ? undefined : (focusTable ? focusTable.split(".")[1] : storeSchema);
+    if (!cat) { setSharingOverlay(null); return; }
+
+    let cancelled = false;
+    api.getSharingOverlay(cat, sch, sharingAudience)
+      .then((o) => { if (!cancelled) setSharingOverlay(o); })
+      .catch(() => { if (!cancelled) setSharingOverlay(null); });
+    return () => { cancelled = true; };
+  }, [sharingEnabled, sharingAudience, focusTable, storeCatalog, storeSchema, scope, setSharingOverlay]);
 
   // Build adjacency maps for O(1) column lineage traversal (computed once when edges change)
   const colAdjacency = useMemo(() => {
@@ -389,7 +491,7 @@ function LineageCanvas() {
   // that's already been replaced.
   // =========================================================================
   useEffect(() => {
-    if (viewNodes.length === 0) {
+    if (augNodes.length === 0) {
       setFlowNodes([]);
       setFlowEdges([]);
       return;
@@ -398,9 +500,9 @@ function LineageCanvas() {
     const controller = new AbortController();
     const fitViewTimers: ReturnType<typeof setTimeout>[] = [];
 
-    const rfNodes: Node[] = viewNodes.map((n) => ({
+    const rfNodes: Node[] = augNodes.map((n: any) => ({
       id: n.id,
-      type: n.node_type === "entity" ? "entityNode" : "tableNode",
+      type: n.node_type === "entity" ? "entityNode" : n.node_type === "sharing" ? "sharingNode" : "tableNode",
       position: { x: 0, y: 0 },
       data: {
         ...n,
@@ -408,19 +510,22 @@ function LineageCanvas() {
         isSelected: false,
         isHighlighted: true,
         isDimmed: false,
+        ...(n.node_type === "table" ? { sharingBadge: badgeByTable.get(n.id) } : {}),
       },
     }));
 
-    const isEntity = (id: string) => id.startsWith("entity:");
-    const rfEdges: Edge[] = viewEdges.map((e) => ({
-      id: `e-${e.source}-${e.target}`,
+    // Entity and sharing nodes use default (unkeyed) handles; only table nodes
+    // expose the explicit table/column handle ids.
+    const isSpecial = (id: string) => id.startsWith("entity:") || id.startsWith("sharing:");
+    const rfEdges: Edge[] = augEdges.map((e: any) => ({
+      id: e.sharing ? `sharing-e-${e.source}-${e.target}` : `e-${e.source}-${e.target}`,
       source: e.source,
       target: e.target,
       // Explicit handle IDs prevent React Flow from routing table edges through column handles
-      sourceHandle: isEntity(e.source) ? undefined : `${e.source}__table__source`,
-      targetHandle: isEntity(e.target) ? undefined : `${e.target}__table__target`,
+      sourceHandle: isSpecial(e.source) ? undefined : `${e.source}__table__source`,
+      targetHandle: isSpecial(e.target) ? undefined : `${e.target}__table__target`,
       type: "animated",
-      data: { isHighlighted: false, isDimmed: false, isColumnEdge: false, isVisible: true },
+      data: { isHighlighted: false, isDimmed: false, isColumnEdge: false, isVisible: true, isSharing: !!e.sharing },
     }));
 
     // ELK layout — always uses collapsed dimensions for stable positioning.
@@ -492,7 +597,7 @@ function LineageCanvas() {
     // expandedNodes is intentionally NOT in the dependency array.
     // Expand/collapse is handled by a separate effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewNodes, viewEdges, reactFlowInstance, layoutKey]);
+  }, [augNodes, augEdges, badgeByTable, reactFlowInstance, layoutKey]);
 
   // =========================================================================
   // EXPAND/COLLAPSE EFFECT — updates node data in place without re-running ELK.
@@ -647,9 +752,13 @@ function LineageCanvas() {
     });
   }, [selectedNode, hoveredNode, connectedNodes, connectedEdges, columnEdges, selectedColumn]);
 
-  // Tooltip on hover (table nodes only — entity nodes show inline info)
+  // Tooltip on hover (table nodes only — entity nodes show inline info).
+  // When the cursor leaves the node we DELAY hiding (tooltipHideTimer) so the
+  // user can move onto the tooltip to select/copy text; hovering the tooltip
+  // cancels that timer (see onMouseEnter on TableTooltip below).
   useEffect(() => {
     if (hoveredNode && !selectedNode && !hoveredNode.startsWith("entity:")) {
+      clearTimeout(tooltipHideTimer.current);
       tooltipTimer.current = setTimeout(() => {
         const node = viewNodes.find((n) => n.id === hoveredNode);
         const rfNode = flowNodes.find((n) => n.id === hoveredNode);
@@ -661,12 +770,22 @@ function LineageCanvas() {
           setTooltipData({ node: node as TableNode, position: viewportPos });
         }
       }, 300);
-    } else {
-      clearTimeout(tooltipTimer.current);
-      setTooltipData(null);
+      return () => clearTimeout(tooltipTimer.current);
     }
-    return () => clearTimeout(tooltipTimer.current);
+    clearTimeout(tooltipTimer.current);
+    tooltipHideTimer.current = setTimeout(() => setTooltipData(null), 260);
+    return () => clearTimeout(tooltipHideTimer.current);
   }, [hoveredNode, selectedNode, viewNodes, flowNodes, reactFlowInstance]);
+
+  // Large-graph hint: show when the graph is big, auto-hide after 6s.
+  useEffect(() => {
+    if (viewNodes.length > 300) {
+      setShowLargeHint(true);
+      const t = setTimeout(() => setShowLargeHint(false), 6000);
+      return () => clearTimeout(t);
+    }
+    setShowLargeHint(false);
+  }, [viewNodes.length]);
 
   const handlePaneClick = useCallback(() => {
     setSelectedNode(null);
@@ -732,10 +851,10 @@ function LineageCanvas() {
             </div>
           </motion.div>
           <div className="text-slate-400 text-[15px] font-medium tracking-tight">
-            Select a catalog and schema to explore lineage
+            Pick a table to explore its lineage
           </div>
-          <div className="text-slate-600 text-[12px] mt-2 max-w-[280px] leading-relaxed">
-            Choose from the dropdowns above, then click Generate Lineage to visualize table dependencies
+          <div className="text-slate-600 text-[12px] mt-2 max-w-[300px] leading-relaxed">
+            Search (⌘K) or browse to any table — its full end-to-end lineage loads automatically, across catalogs and schemas.
           </div>
         </div>
       </div>
@@ -773,15 +892,11 @@ function LineageCanvas() {
         />
       </ReactFlow>
 
-      {/* Large-graph hint — auto-hides after 6s.
-          Since ELK layout runs on the main thread, graphs with many nodes
-          can briefly freeze the UI during layout. This tells users that's
-          expected, not a bug. Threshold is empirical: below 300 nodes the
-          freeze is imperceptible. */}
-      {viewNodes.length > 300 && (
-        <AnimatePresence>
+      {/* Large-graph hint — auto-hides after 6s via state (below). Layout of many
+          nodes can briefly freeze the UI; this signals that's expected, not a bug. */}
+      <AnimatePresence>
+        {showLargeHint && (
           <motion.div
-            key={`large-graph-hint-${viewNodes.length}`}
             initial={{ opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
@@ -793,17 +908,11 @@ function LineageCanvas() {
               text-amber-200 text-[11px] font-medium
               shadow-[0_2px_12px_rgba(0,0,0,0.3)]
             "
-            onAnimationComplete={() => {
-              setTimeout(() => {
-                const el = document.querySelector(`[data-key="large-graph-hint-${viewNodes.length}"]`);
-                if (el) (el as HTMLElement).style.display = "none";
-              }, 6000);
-            }}
           >
             Large graph ({viewNodes.length} nodes) — layout may take a few seconds
           </motion.div>
-        </AnimatePresence>
-      )}
+        )}
+      </AnimatePresence>
 
       {/* Reset Layout button */}
       <button
@@ -828,6 +937,8 @@ function LineageCanvas() {
           <TableTooltip
             node={tooltipData.node}
             position={tooltipData.position}
+            onMouseEnter={() => clearTimeout(tooltipHideTimer.current)}
+            onMouseLeave={() => setTooltipData(null)}
           />
         )}
       </AnimatePresence>

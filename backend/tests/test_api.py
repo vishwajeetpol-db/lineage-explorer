@@ -29,9 +29,10 @@ def client(mock_execute_sql, monkeypatch):
 
 
 def test_health_endpoint(client):
+    from backend.main import APP_VERSION
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok", "version": "1.2.0"}
+    assert r.json() == {"status": "ok", "version": APP_VERSION}
 
 
 def test_list_catalogs_endpoint(client):

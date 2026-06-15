@@ -1,9 +1,16 @@
 import { memo, useCallback, useMemo, useRef } from "react";
 import { Handle, Position, type NodeProps } from "reactflow";
 import { motion, AnimatePresence } from "framer-motion";
-import { Database, Eye, Layers, ChevronDown, Key, ExternalLink, HardDrive, FolderOpen, Zap } from "lucide-react";
+import { Database, Eye, Layers, ChevronDown, Key, ExternalLink, HardDrive, FolderOpen, Zap, Share2, Building2 } from "lucide-react";
 import { useLineageStore } from "../../store/lineageStore";
 import type { TableNode as TableNodeType } from "../../api/client";
+
+// Injected by the Delta Sharing overlay (see LineageCanvas). Optional — only
+// present when the Sharing toggle is on and this table participates in a share.
+export type SharingBadge = {
+  out?: { shares: string[]; recipients: string[] };
+  in?: { provider: string; shares: string[] };
+};
 
 const typeConfig: Record<string, { color: string; bg: string; border: string; icon: typeof Database; label: string; dot: string }> = {
   MANAGED: { color: "text-blue-400", bg: "bg-blue-500/10", border: "border-blue-500/25", icon: Database, label: "TABLE", dot: "bg-blue-400" },
@@ -17,8 +24,16 @@ const typeConfig: Record<string, { color: string; bg: string; border: string; ic
   PATH: { color: "text-orange-400", bg: "bg-orange-500/10", border: "border-orange-500/25", icon: HardDrive, label: "STORAGE", dot: "bg-orange-400" },
 };
 
-function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded: boolean; isSelected: boolean; isHighlighted: boolean; isDimmed: boolean; isRevealed?: boolean }>) {
-  const { columnLineageEnabled, selectedColumn, toggleNodeExpanded, setSelectedColumn, setHoveredNode } = useLineageStore();
+function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded: boolean; isSelected: boolean; isHighlighted: boolean; isDimmed: boolean; isRevealed?: boolean; sharingBadge?: SharingBadge }>) {
+  // Field selectors, NOT whole-store destructuring: a table node must re-render
+  // only when column mode / selected column change — not on every hover/select/
+  // loading change. With hundreds of nodes, whole-store subscription = every node
+  // re-rendering on each hover (and memo() can't help — the hook fires first).
+  const columnLineageEnabled = useLineageStore((s) => s.columnLineageEnabled);
+  const selectedColumn = useLineageStore((s) => s.selectedColumn);
+  const toggleNodeExpanded = useLineageStore((s) => s.toggleNodeExpanded);
+  const setSelectedColumn = useLineageStore((s) => s.setSelectedColumn);
+  const setHoveredNode = useLineageStore((s) => s.setHoveredNode);
   const config = typeConfig[data.table_type] || typeConfig.MANAGED;
   const Icon = config.icon;
   const isExpanded = data.isExpanded;
@@ -96,6 +111,26 @@ function TableNodeComponent({ data, id }: NodeProps<TableNodeType & { isExpanded
         <span className={`text-[9px] font-bold tracking-wider px-2 py-0.5 rounded-full ${config.bg} ${config.color} border ${config.border} uppercase flex-shrink-0`}>
           {config.label}
         </span>
+
+        {/* Delta Sharing badges — outbound (shared to recipients) / inbound (shared-in) */}
+        {data.sharingBadge?.out && (
+          <span
+            className="flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-teal-500/10 text-teal-300 border border-teal-400/30 flex-shrink-0"
+            title={`Shared via ${data.sharingBadge.out.shares.join(", ")}${data.sharingBadge.out.recipients.length ? ` → ${data.sharingBadge.out.recipients.join(", ")}` : ""}`}
+          >
+            <Share2 size={9} />
+            {data.sharingBadge.out.recipients.length || data.sharingBadge.out.shares.length}
+          </span>
+        )}
+        {data.sharingBadge?.in && (
+          <span
+            className="flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-violet-500/10 text-violet-300 border border-violet-400/30 flex-shrink-0"
+            title={`Shared in from provider ${data.sharingBadge.in.provider}`}
+          >
+            <Building2 size={9} />
+            shared-in
+          </span>
+        )}
 
         {columnLineageEnabled && columns.length > 0 && (
           <motion.div

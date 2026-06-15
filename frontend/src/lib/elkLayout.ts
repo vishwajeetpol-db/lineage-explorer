@@ -17,6 +17,8 @@ const COLUMN_ROW_HEIGHT = 28;
 const EXPANDED_WIDTH = 320;
 const ENTITY_WIDTH = 200;
 const ENTITY_HEIGHT = 44;
+const SHARING_WIDTH = 190;
+const SHARING_HEIGHT = 46;
 
 export interface LayoutResult {
   nodes: Node[];
@@ -50,6 +52,9 @@ export async function layoutGraph(
   function toElkNode(node: Node) {
     if (node.data?.node_type === "entity") {
       return { id: node.id, width: ENTITY_WIDTH, height: ENTITY_HEIGHT };
+    }
+    if (node.data?.node_type === "sharing") {
+      return { id: node.id, width: SHARING_WIDTH, height: SHARING_HEIGHT };
     }
     const isExpanded = expandedNodes.has(node.id);
     const columnCount = node.data?.columns?.length || 0;

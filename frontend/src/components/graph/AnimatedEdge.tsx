@@ -10,7 +10,7 @@ function AnimatedEdge({
   sourcePosition,
   targetPosition,
   data,
-}: EdgeProps<{ isHighlighted: boolean; isDimmed: boolean; isColumnEdge: boolean; isVisible?: boolean; isPipelineEdge?: boolean }>) {
+}: EdgeProps<{ isHighlighted: boolean; isDimmed: boolean; isColumnEdge: boolean; isVisible?: boolean; isPipelineEdge?: boolean; isSharing?: boolean }>) {
   if (data?.isVisible === false) return null;
 
   const [edgePath] = getBezierPath({
@@ -65,6 +65,22 @@ function AnimatedEdge({
         stroke="#1E1E2E"
         strokeWidth={1}
         style={{ opacity: 0.3, transition: "all 0.4s ease" }}
+      />
+    );
+  }
+
+  // Delta Sharing boundary edge: dashed teal, no traveling dot — signals a
+  // sharing relationship, NOT observed transform lineage.
+  if (data?.isSharing) {
+    return (
+      <path
+        id={id}
+        d={edgePath}
+        fill="none"
+        stroke="rgba(45,212,191,0.55)"
+        strokeWidth={1.5}
+        strokeDasharray="5 4"
+        style={{ transition: "all 0.4s ease" }}
       />
     );
   }

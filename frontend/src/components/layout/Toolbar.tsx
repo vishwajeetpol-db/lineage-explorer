@@ -21,6 +21,7 @@ function Toolbar({ onGenerate }: Props) {
   } = useLineageStore();
 
   const nodes = useLineageStore((s) => s.nodes);
+  const truncated = useLineageStore((s) => s.truncated);
   const [toast, setToast] = useState<string | null>(null);
   const orphanCount = useMemo(() => nodes.filter((n) => n.node_type === "table" && n.lineage_status === "orphan").length, [nodes]);
 
@@ -37,8 +38,11 @@ function Toolbar({ onGenerate }: Props) {
     const onDown = (e: MouseEvent) => {
       if (viewMenuRef.current && !viewMenuRef.current.contains(e.target as Node)) setViewMenuOpen(false);
     };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
+    // Capture phase: the ReactFlow canvas stops pointer events from bubbling,
+    // so a non-capture document listener never fires on a graph click. Capture
+    // runs before that, guaranteeing the popover closes on any outside click.
+    document.addEventListener("mousedown", onDown, true);
+    return () => document.removeEventListener("mousedown", onDown, true);
   }, [viewMenuOpen]);
 
   // "Options" popover holds the secondary Depth + Discount controls so they
@@ -50,8 +54,11 @@ function Toolbar({ onGenerate }: Props) {
     const onDown = (e: MouseEvent) => {
       if (optionsRef.current && !optionsRef.current.contains(e.target as Node)) setOptionsOpen(false);
     };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
+    // Capture phase: the ReactFlow canvas stops pointer events from bubbling,
+    // so a non-capture document listener never fires on a graph click. Capture
+    // runs before that, guaranteeing the popover closes on any outside click.
+    document.addEventListener("mousedown", onDown, true);
+    return () => document.removeEventListener("mousedown", onDown, true);
   }, [optionsOpen]);
   const optionsActive = (!!focusTable && (lineageDepth || 0) > 0) || (discountPercent || 0) > 0;
 
@@ -112,7 +119,7 @@ function Toolbar({ onGenerate }: Props) {
       animate={{ y: 0, opacity: 1 }}
       transition={{ duration: 0.25 }}
       className="
-        relative z-50 flex items-center gap-4 px-5 h-14
+        relative z-50 flex items-center gap-3 px-4 h-14
         bg-[#0D0D16]/90 backdrop-blur-xl
         border-b border-white/[0.04]
       "
@@ -141,7 +148,7 @@ function Toolbar({ onGenerate }: Props) {
           forces overflow-y to compute as auto, which clips the dropdown/popover
           menus that open below the bar. The compact controls fit without it;
           flex-1 + min-w-0 keeps the right-side actions pinned and visible. */}
-      <div className="flex items-center gap-4 flex-1 min-w-0">
+      <div className="flex items-center gap-2.5 flex-1 min-w-0">
 
       {/* Divider */}
       <div className="w-px h-8 bg-white/[0.06] flex-shrink-0" />
@@ -157,7 +164,7 @@ function Toolbar({ onGenerate }: Props) {
             <ArrowLeft size={13} className="text-slate-500 group-hover:text-slate-300 transition-colors" />
             <span className="text-[11px] text-slate-500 group-hover:text-slate-300 font-medium transition-colors">Back</span>
           </button>
-          <div className="flex items-center gap-2 px-3 py-1.5 flex-shrink-0 max-w-[340px] rounded-lg bg-accent/[0.06] border border-accent/20" title={focusTable}>
+          <div className="flex items-center gap-2 px-3 py-1.5 flex-shrink-0 max-w-[300px] rounded-lg bg-accent/[0.06] border border-accent/20" title={focusTable}>
             <div className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_6px] shadow-accent/40 flex-shrink-0" />
             <span className="font-mono text-[12px] text-accent-light tracking-tight truncate">{focusTable}</span>
           </div>
@@ -306,7 +313,7 @@ function Toolbar({ onGenerate }: Props) {
       )}
 
       {/* Column Lineage — disabled in pipeline-only mode and catalog-wide scope */}
-      <div className={`flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-white/[0.02] border border-white/[0.04] flex-shrink-0 ${columnsDisabled ? "opacity-30 pointer-events-none" : ""}`}>
+      <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/[0.02] border border-white/[0.04] flex-shrink-0 ${columnsDisabled ? "opacity-30 pointer-events-none" : ""}`} title="Column-level lineage">
         <Columns3 size={13} className="text-slate-500" />
         <span className="text-[11px] text-slate-500 font-medium">Columns</span>
         <button
@@ -329,13 +336,15 @@ function Toolbar({ onGenerate }: Props) {
         </button>
       </div>
 
+      {/* Delta Sharing is always-on (no toggle) — the overlay is applied
+          automatically so shared-in/out relationships are part of the picture. */}
+
       {/* Live Query */}
       <div
-        className={`flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-white/[0.02] border border-white/[0.04] flex-shrink-0 ${!isAdmin ? "opacity-50" : ""}`}
-        title={!isAdmin ? "Only workspace admins can enable live mode" : "Toggle live query mode"}
+        className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/[0.02] border border-white/[0.04] flex-shrink-0 ${!isAdmin ? "opacity-50" : ""}`}
+        title={!isAdmin ? "Live mode — admins only" : "Toggle live query mode"}
       >
         <Zap size={13} className={liveMode ? "text-amber-400" : "text-slate-500"} />
-        <span className="text-[11px] text-slate-500 font-medium">Live</span>
         {!isAdmin && <Lock size={10} className="text-slate-600" />}
         <button
           onClick={handleLiveModeToggle}
@@ -386,7 +395,7 @@ function Toolbar({ onGenerate }: Props) {
       </div>{/* end scrollable middle controls */}
 
       {/* Right actions — pinned, always visible (never scrolled off / clipped) */}
-      <div className="flex items-center gap-4 flex-shrink-0">
+      <div className="flex items-center gap-2.5 flex-shrink-0 pl-1 bg-[#0D0D16]/90">
       {/* Export to Excel — only when a graph is loaded */}
       {nodes.length > 0 && (
         <button
@@ -458,6 +467,14 @@ function Toolbar({ onGenerate }: Props) {
         ) : (
           <>Loaded fresh from system tables{cacheExpiresAt ? ` · Cache expires ${formatTimeUntil(cacheExpiresAt)}` : ""}</>
         )}
+      </div>
+    )}
+
+    {/* Truncation banner — the trace hit the node cap, so the graph is partial */}
+    {truncated && nodes.length > 0 && (
+      <div className="flex items-center justify-center gap-2 px-4 py-1 text-[10px] font-medium tracking-wide bg-orange-500/10 text-orange-300 border-b border-orange-500/20">
+        <AlertTriangle size={10} className="flex-shrink-0" />
+        This lineage is very large and was capped — the graph shown is partial. Narrow your starting point to see a complete trace.
       </div>
     )}
 

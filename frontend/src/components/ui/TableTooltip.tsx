@@ -6,6 +6,8 @@ import type { TableNode } from "../../api/client";
 interface Props {
   node: TableNode;
   position: { x: number; y: number };
+  onMouseEnter?: () => void;
+  onMouseLeave?: () => void;
 }
 
 const typeIcons: Record<string, { icon: typeof Database; color: string; label: string }> = {
@@ -16,7 +18,7 @@ const typeIcons: Record<string, { icon: typeof Database; color: string; label: s
   MATERIALIZED_VIEW: { icon: Layers, color: "text-amber-400", label: "Materialized View" },
 };
 
-function TableTooltip({ node, position }: Props) {
+function TableTooltip({ node, position, onMouseEnter, onMouseLeave }: Props) {
   const typeInfo = typeIcons[node.table_type] || typeIcons.MANAGED;
   const TypeIcon = typeInfo.icon;
 
@@ -30,16 +32,18 @@ function TableTooltip({ node, position }: Props) {
       animate={{ opacity: 1, scale: 1, x: 0 }}
       exit={{ opacity: 0, scale: 0.96 }}
       transition={{ duration: 0.12, ease: "easeOut" }}
-      className="fixed z-[9999] pointer-events-none"
+      className="fixed z-[9999] pointer-events-auto"
       style={{ left: clampedX + 12, top: clampedY }}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
     >
       <div className="rounded-xl overflow-hidden border border-white/[0.08] shadow-[0_16px_48px_rgba(0,0,0,0.6),0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-2xl bg-[#13131F]/90 min-w-[270px]">
-        {/* Header */}
+        {/* Header — full name is selectable so it can be copied */}
         <div className="px-4 pt-3.5 pb-2">
-          <div className="font-mono font-semibold text-[14px] text-white tracking-tight">
+          <div className="font-mono font-semibold text-[14px] text-white tracking-tight select-text">
             {node.name}
           </div>
-          <div className="font-mono text-[10px] text-slate-500 mt-1 tracking-wide">
+          <div className="font-mono text-[10px] text-slate-500 mt-1 tracking-wide select-text cursor-text break-all">
             {node.full_name}
           </div>
         </div>
