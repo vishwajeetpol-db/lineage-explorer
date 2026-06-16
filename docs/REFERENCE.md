@@ -241,6 +241,9 @@ Entity nodes (jobs, pipelines) are transparent -- they do not count as a hop. A 
 | **Table** | Dark card, 280px wide | A table or view. Shows name, type badge, expandable columns. |
 | **Entity** | Smaller card, 200px wide | A job, notebook, or DLT pipeline. Green (ran today) or amber (stale). Shows serverless cost in bold green badge when available. Hover tooltip shows job name, owner, last run time, freshness status, and cost breakdown (list price, discount). |
 | **Cross-Schema** | Cyan dashed border, 280px wide | A table from a different schema/catalog referenced in lineage. Shows `CROSS-SCHEMA` badge. Full column metadata fetched from source schema's `information_schema` — expandable and clickable for column lineage. |
+| **Sharing boundary** | Dashed teal pill | A Delta Sharing relationship — a `SHARE`, `RECIPIENT`, or `PROVIDER` — injected automatically when lineage touches shared data. Not a real lineage object; it marks where data crosses the share/metastore boundary. |
+
+**Delta Sharing badges:** table nodes that participate in a share carry a small badge — teal **"shared-out"** (this table is published into a share) or violet **"shared-in"** (this table comes from a Delta Share foreign catalog). These appear automatically; there is no toggle.
 
 ### Table Node Status
 
@@ -259,6 +262,7 @@ Entity nodes (jobs, pipelines) are transparent -- they do not count as a hop. A 
 | Table lineage (hover/select) | Indigo | Full transitive upstream/downstream path |
 | Pipeline scope (hover/select) | Orange | One-hop: direct source and target tables |
 | Column lineage (click column) | Purple | Transitive column flow from UC edges |
+| Delta Sharing boundary | Dashed teal | Table → share → recipient (outbound) or provider → table (inbound). A *sharing relationship*, not observed transform lineage. |
 
 ---
 
@@ -921,7 +925,7 @@ lineage-explorer/
             +-- LandingPage.tsx  # Dashboard landing page (table list, stats, charts)
             +-- AdminDashboard.tsx # Standalone admin dashboard (separate page)
             +-- graph/           # LineageCanvas, TableNode, EntityNode, AnimatedEdge
-            +-- layout/          # Toolbar (view slider, depth control, burger menu)
+            +-- layout/          # Toolbar (view-mode dropdown, Options popover, burger menu)
             +-- ui/              # Skeleton, SearchDialog, TableTooltip, ErrorBoundary
 ```
 
