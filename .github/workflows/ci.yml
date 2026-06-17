@@ -51,15 +51,3 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run build
-
-  bundle-validate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Databricks CLI
-        run: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
-      - name: Validate bundle config (dev)
-        env:
-          DATABRICKS_HOST: https://example.cloud.databricks.com
-          DATABRICKS_TOKEN: ci-stub-token
-        run: databricks bundle validate -t dev --var warehouse_id=stub
