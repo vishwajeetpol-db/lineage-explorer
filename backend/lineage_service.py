@@ -1454,9 +1454,34 @@ def run_diagnostics() -> dict:
               "SELECT 1 FROM system.information_schema.shares LIMIT 1",
               "Grant the SPN SELECT on system.information_schema for Delta Sharing badges.",
               required=False)
-        probe("catalogs browsable", "SHOW CATALOGS",
-              "Grant USE CATALOG + BROWSE on each explorable catalog (see setup.sql).",
-              required=True)
+        # Catalog metadata (BROWSE). SHOW CATALOGS only reflects USE CATALOG, so a
+        # catalog can be "visible" yet expose no table/column metadata when BROWSE
+        # is missing — which silently breaks node/column expansion. Probe each user
+        # catalog's information_schema to detect that gap and name the offenders.
+        try:
+            cat_rows = _execute_sql(client, "SHOW CATALOGS")
+            names = [next(iter(r.values())) for r in cat_rows]
+            user_cats = [c for c in names
+                         if c not in ("system", "samples", "__databricks_internal")][:8]
+            readable, visible_no_meta = [], []
+            for c in user_cats:
+                try:
+                    rows = _execute_sql(client, f"SELECT 1 FROM `{c}`.information_schema.tables LIMIT 1")
+                    (readable if rows else visible_no_meta).append(c)
+                except Exception:
+                    visible_no_meta.append(c)
+            check = {"check": "catalog metadata (BROWSE)",
+                     "ok": len(readable) > 0 or len(user_cats) == 0,
+                     "required": True,
+                     "detail": f"{len(readable)}/{len(user_cats)} sampled catalog(s) expose metadata"}
+            if visible_no_meta:
+                check["hint"] = ("Visible but no table metadata — grant BROWSE to the app SPN "
+                                 f"(see setup.sql): {', '.join(map(str, visible_no_meta))}")
+            checks.append(check)
+        except Exception as e:
+            checks.append({"check": "catalog metadata (BROWSE)", "ok": False, "required": True,
+                           "detail": str(e)[:200],
+                           "hint": "Grant USE CATALOG + BROWSE on each explorable catalog (see setup.sql)."})
 
     required_ok = all(c["ok"] for c in checks if c.get("required"))
     return {

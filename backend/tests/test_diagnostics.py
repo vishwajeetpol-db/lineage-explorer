@@ -49,3 +49,25 @@ class TestRunDiagnostics:
         assert r["ok"] is True
         bill = next(c for c in r["checks"] if "system.billing" in c["check"])
         assert not bill["ok"] and bill["required"] is False
+
+    def test_browse_gap_named_in_hint(self, monkeypatch):
+        # cat_b is visible (SHOW CATALOGS) but its information_schema returns no
+        # rows — the missing-BROWSE signature. It must be named in the hint, while
+        # overall ok stays True because cat_a IS readable.
+        monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh")
+
+        def fake_exec(client, sql, catalog=None):
+            if "SHOW CATALOGS" in sql:
+                return [{"catalog": "cat_a"}, {"catalog": "cat_b"}, {"catalog": "system"}]
+            if "`cat_b`.information_schema.tables" in sql:
+                return []  # visible, no metadata → BROWSE missing
+            return [{"x": 1}]
+
+        monkeypatch.setattr(lineage_service, "_get_client", lambda: object())
+        monkeypatch.setattr(lineage_service, "_execute_sql", fake_exec)
+        r = lineage_service.run_diagnostics()
+        browse = next(c for c in r["checks"] if "BROWSE" in c["check"])
+        assert browse["ok"] is True            # cat_a readable → not a hard failure
+        assert "cat_b" in browse.get("hint", "")
+        assert "cat_a" not in browse.get("hint", "")
+        assert r["ok"] is True
