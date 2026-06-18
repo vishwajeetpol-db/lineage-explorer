@@ -537,6 +537,27 @@ def _wrap_with_cache_metadata(
         ).isoformat()
     if fetch_ms is not None:
         updates["fetch_duration_ms"] = fetch_ms
+
+    # Re-attach entity cost from the LIVE cost cache at serve time. Cost is
+    # otherwise baked into the graph when it's built and cached (TTL up to 8h),
+    # so a cold start — where the ~4-min background cost-cache refresh hasn't
+    # finished when the first graph is built — would leave every job/pipeline
+    # node cost-less until the lineage cache expires. Re-attaching here (cheap
+    # dict lookups, on a fresh nodes list so the cached object isn't mutated)
+    # means cost appears on the next request after the cost cache populates.
+    if result.nodes and (_cost_by_job_id or _cost_by_pipeline_id):
+        new_nodes = []
+        changed = False
+        for n in result.nodes:
+            if isinstance(n, EntityNode):
+                c = _entity_cost(n.entity_type, n.entity_id)
+                if c != n.cost_usd:
+                    n = n.model_copy(update={"cost_usd": c})
+                    changed = True
+            new_nodes.append(n)
+        if changed:
+            updates["nodes"] = new_nodes
+
     return result.model_copy(update=updates) if updates else result
 
 
